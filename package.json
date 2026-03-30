@@ -1,0 +1,29 @@
+{
+  "name": "lordsguide",
+  "version": "5.1.0",
+  "description": "LordsGuide — AI-powered sermon prep, Bible study & faith community. The Miracle Edition.",
+  "author": "Kevin <kjssamsungdev-max>",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node src/scripture-forge.test.js",
+    "deploy": "wrangler pages deploy dist --project-name=lordsguide",
+    "deploy:preview": "wrangler pages deploy dist --project-name=lordsguide --branch=preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "terser": "^5.46.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0",
+    "wrangler": "^3.99.0"
+  }
+}

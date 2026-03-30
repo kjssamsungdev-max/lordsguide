@@ -1,0 +1,15 @@
+# LordsGuide — Cloudflare Pages Configuration
+# Docs: https://developers.cloudflare.com/pages/
+
+name = "lordsguide"
+compatibility_date = "2025-03-01"
+pages_build_output_dir = "dist"
+
+[build]
+command = "npm run build"
+
+# Environment variables set via Cloudflare Dashboard (never in this file):
+# - VITE_ANTHROPIC_PROXY_URL (Cloudflare Worker proxy for API calls)
+#
+# For local dev, create a .dev.vars file (gitignored):
+# ANTHROPIC_API_KEY=your-key-here

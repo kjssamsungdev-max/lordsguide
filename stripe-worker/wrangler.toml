@@ -1,0 +1,29 @@
+# LordsGuide — Stripe Payment Worker
+# 
+# SETUP:
+# 1. Create KV namespace:
+#    npx wrangler kv namespace create LORDSGUIDE_KV
+#    → Copy the ID into the binding below
+#
+# 2. Set secrets:
+#    npx wrangler secret put STRIPE_SECRET_KEY
+#    npx wrangler secret put STRIPE_WEBHOOK_SECRET
+#    npx wrangler secret put STRIPE_SHEPHERD_PRICE
+#    npx wrangler secret put STRIPE_COMMISSION_PRICE
+#
+# 3. Deploy:
+#    npx wrangler deploy
+#
+# 4. Set webhook in Stripe Dashboard:
+#    https://lg-payments.YOUR-SUBDOMAIN.workers.dev/webhook
+#    Events: checkout.session.completed, customer.subscription.updated,
+#            customer.subscription.deleted, invoice.payment_failed
+
+name = "lg-payments"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+account_id = "dbaac4c99956159d7594d90033b0224d"
+
+[[kv_namespaces]]
+binding = "LORDSGUIDE_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

@@ -1,0 +1,9 @@
+# LordsGuide — Telegram/WhatsApp Messaging Bot
+# Deploy: npx wrangler deploy
+# Set secret: npx wrangler secret put TELEGRAM_BOT_TOKEN
+# Set webhook: https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://lg-bot.your-subdomain.workers.dev/telegram
+
+name = "lg-bot"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+account_id = "dbaac4c99956159d7594d90033b0224d"

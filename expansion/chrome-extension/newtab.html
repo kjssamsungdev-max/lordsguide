@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LordsGuide</title>
+  <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #faf8f4;
+      font-family: 'DM Sans', sans-serif;
+      color: #2d2416;
+    }
+    .container {
+      max-width: 560px;
+      padding: 40px 32px;
+      text-align: center;
+      animation: fadeUp 0.8s ease;
+    }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    .cross { font-size: 36px; color: #8b6914; margin-bottom: 16px; }
+    .verse-text {
+      font-family: 'Libre Baskerville', serif;
+      font-size: 22px;
+      font-style: italic;
+      line-height: 1.8;
+      color: #2d2416;
+      margin-bottom: 12px;
+    }
+    .verse-ref {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 13px;
+      color: #8b6914;
+      font-weight: 500;
+      letter-spacing: 1px;
+      margin-bottom: 32px;
+    }
+    .prayer {
+      font-size: 14px;
+      color: #8a7e6e;
+      line-height: 1.7;
+      font-style: italic;
+      max-width: 440px;
+      margin: 0 auto 28px;
+    }
+    .cta {
+      display: inline-block;
+      padding: 10px 24px;
+      background: #8b6914;
+      color: #fff;
+      border-radius: 10px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all 0.15s;
+    }
+    .cta:hover { background: #a07a18; transform: scale(1.02); }
+    .brand {
+      margin-top: 40px;
+      font-size: 10px;
+      color: #e8e0d4;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .search-bar {
+      margin-top: 24px;
+      display: flex;
+      justify-content: center;
+    }
+    .search-bar input {
+      width: 320px;
+      padding: 10px 16px;
+      border: 1px solid #e8e0d4;
+      border-radius: 24px;
+      font-size: 14px;
+      font-family: 'DM Sans', sans-serif;
+      background: #fff;
+      color: #2d2416;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .search-bar input:focus { border-color: #8b6914; box-shadow: 0 0 0 3px rgba(139,105,20,0.1); }
+    .search-bar input::placeholder { color: #b5a99a; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="cross">✝</div>
+    <div class="verse-text" id="verse"></div>
+    <div class="verse-ref" id="ref"></div>
+    <div class="prayer" id="prayer"></div>
+    <a href="https://lordsguide.com" class="cta" target="_blank">Open LordsGuide</a>
+    <div class="search-bar">
+      <form action="https://www.google.com/search" method="GET">
+        <input type="text" name="q" placeholder="Search the web..." autofocus>
+      </form>
+    </div>
+    <div class="brand">LordsGuide</div>
+  </div>
+
+  <script>
+    const VERSES = [
+      { text: "For I know the plans I have for you, declares the Lord, plans to prosper you and not to harm you, plans to give you hope and a future.", ref: "Jeremiah 29:11" },
+      { text: "I can do all things through Christ which strengtheneth me.", ref: "Philippians 4:13" },
+      { text: "The Lord is my shepherd; I shall not want.", ref: "Psalm 23:1" },
+      { text: "Trust in the Lord with all thine heart; and lean not unto thine own understanding.", ref: "Proverbs 3:5" },
+      { text: "Be strong and of a good courage; be not afraid, neither be thou dismayed: for the Lord thy God is with thee.", ref: "Joshua 1:9" },
+      { text: "But they that wait upon the Lord shall renew their strength; they shall mount up with wings as eagles.", ref: "Isaiah 40:31" },
+      { text: "And we know that all things work together for good to them that love God.", ref: "Romans 8:28" },
+      { text: "The Lord is my light and my salvation; whom shall I fear?", ref: "Psalm 27:1" },
+      { text: "Fear thou not; for I am with thee: be not dismayed; for I am thy God.", ref: "Isaiah 41:10" },
+      { text: "Come unto me, all ye that labour and are heavy laden, and I will give you rest.", ref: "Matthew 11:28" },
+      { text: "The joy of the Lord is your strength.", ref: "Nehemiah 8:10" },
+      { text: "He leadeth me beside the still waters. He restoreth my soul.", ref: "Psalm 23:2-3" },
+      { text: "Be still, and know that I am God.", ref: "Psalm 46:10" },
+      { text: "My grace is sufficient for thee: for my strength is made perfect in weakness.", ref: "2 Corinthians 12:9" },
+      { text: "Casting all your care upon him; for he careth for you.", ref: "1 Peter 5:7" },
+      { text: "The name of the Lord is a strong tower: the righteous runneth into it, and is safe.", ref: "Proverbs 18:10" },
+      { text: "For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life.", ref: "John 3:16" },
+      { text: "Draw nigh to God, and he will draw nigh to you.", ref: "James 4:8" },
+    ];
+
+    const PRAYERS = [
+      "Lord, thank You for this new day. Guide my steps and use me for Your glory. Amen.",
+      "Father, fill me with Your peace. Help me trust You in every moment. Amen.",
+      "Dear Lord, give me wisdom for today and compassion for everyone I meet. Amen.",
+      "Lord Jesus, be my strength, my hope, and my joy today. Amen.",
+      "Heavenly Father, I surrender this day to You. Let Your will be done. Amen.",
+    ];
+
+    const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+    const verse = VERSES[dayOfYear % VERSES.length];
+    const prayer = PRAYERS[dayOfYear % PRAYERS.length];
+
+    document.getElementById('verse').textContent = `"${verse.text}"`;
+    document.getElementById('ref').textContent = `— ${verse.ref} KJV`;
+    document.getElementById('prayer').textContent = prayer;
+  </script>
+</body>
+</html>

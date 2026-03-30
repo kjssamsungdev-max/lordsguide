@@ -1,0 +1,19 @@
+# LordsGuide — API Proxy Worker
+# Keeps ANTHROPIC_API_KEY server-side
+#
+# Deploy:
+#   cd api-proxy
+#   npx wrangler deploy
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#     → paste your API key when prompted
+
+name = "lg-api-proxy"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+account_id = "dbaac4c99956159d7594d90033b0224d"
+
+# The API key is set as a secret (never in this file):
+# npx wrangler secret put ANTHROPIC_API_KEY
+
+[observability]
+enabled = true

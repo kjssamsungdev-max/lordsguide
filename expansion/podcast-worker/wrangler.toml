@@ -1,0 +1,9 @@
+# LordsGuide — Podcast RSS Feed Generator
+# Deploy: npx wrangler deploy
+# Feed URL: https://lg-podcast.your-subdomain.workers.dev/feed.xml
+# Submit to: Spotify (podcasters.spotify.com), Apple (podcastsconnect.apple.com)
+
+name = "lg-podcast"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+account_id = "dbaac4c99956159d7594d90033b0224d"
