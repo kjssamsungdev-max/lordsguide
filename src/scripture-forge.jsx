@@ -113,7 +113,7 @@ function validateIllustrations(d) {
 }
 
 // ── AI call with retry ──
-const API_URL = "https://api.anthropic.com/v1/messages";
+const API_URL = "https://lg-api-proxy.kjssamsungdev.workers.dev";
 
 async function callClaude(sys, usr, retries = 1) {
   for (let attempt = 0; attempt <= retries; attempt++) {
