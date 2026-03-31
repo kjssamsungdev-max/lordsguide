@@ -39,12 +39,11 @@ function isValidEmail(e) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 
-// Utilities exported for testing
-export { sanitize, isValidEmail, isValidPassage, validateSermon, validateTopical, validateSource, validateIllustrations, parseAIJSON, lruEvict, TIER_LIMITS, INPUT_LIMITS };
+// Utilities exported for testing in deploy build (see scripture-forge.test.js)
 
 // ── F1: Tier limits & gating ──
 const TIER_LIMITS = {
-  miracle: { aiCallsPerDay: 3, sourcesPerDay: 1, podium: false, illustrations: false, songsPerDay: 1 },
+  miracle: { aiCallsPerDay: 10, sourcesPerDay: 10, podium: false, illustrations: false, songsPerDay: 1 },
   shepherd: { aiCallsPerDay: 50, sourcesPerDay: 50, podium: true, illustrations: true, songsPerDay: 20 },
   commission: { aiCallsPerDay: 200, sourcesPerDay: 200, podium: true, illustrations: true, songsPerDay: 100 },
 };
@@ -70,7 +69,12 @@ async function incrementUsage(userId, field) {
 // ── F14: Passage format validation ──
 function isValidPassage(p) {
   if (!p || p.length < 3) return false;
-  return /^(\d\s)?[A-Za-z]+(\s[A-Za-z]+){0,3}\s\d+/.test(p.trim());
+  // Accept multiple passages: "Romans 8:28, Joshua 14:6-15" or "Romans 8:28; John 3:16"
+  // Also accept just a book name like "Psalms" or "Genesis 1"
+  const parts = p.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  // Each part should start with a letter or digit (for books like "1 John")
+  return parts.every(part => /^(\d\s)?[A-Za-z]+/.test(part));
 }
 
 // ── F3: Schema validators ──
@@ -109,8 +113,7 @@ function validateIllustrations(d) {
 }
 
 // ── AI call with retry ──
-let API_URL = "https://api.anthropic.com/v1/messages";
-try { if (import.meta?.env?.VITE_ANTHROPIC_PROXY_URL) API_URL = import.meta.env.VITE_ANTHROPIC_PROXY_URL; } catch {}
+const API_URL = "https://api.anthropic.com/v1/messages";
 
 async function callClaude(sys, usr, retries = 1) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -155,14 +158,31 @@ function parseAIJSON(raw) {
 }
 
 // ── Bible text (free API) ──
-async function fetchBibleText(ref) {
+// ── Bible Versions — free/public domain translations ──
+const BIBLE_VERSIONS = [
+  { id: "kjv", name: "King James Version", abbr: "KJV", year: 1611, style: "Formal", api: "bible-api", tradition: "Protestant" },
+  { id: "web", name: "World English Bible", abbr: "WEB", year: 2000, style: "Modern", api: "bible-api", tradition: "All" },
+  { id: "asv", name: "American Standard", abbr: "ASV", year: 1901, style: "Literal", api: "bolls", tradition: "Protestant" },
+  { id: "bbe", name: "Bible in Basic English", abbr: "BBE", year: 1965, style: "Simple", api: "bible-api", tradition: "All" },
+  { id: "darby", name: "Darby Translation", abbr: "DARBY", year: 1890, style: "Literal", api: "bolls", tradition: "Protestant" },
+  { id: "ylt", name: "Young's Literal", abbr: "YLT", year: 1862, style: "Ultra-literal", api: "bolls", tradition: "Protestant" },
+  { id: "oeb-us", name: "Open English Bible (US)", abbr: "OEB", year: 2010, style: "Modern", api: "bible-api", tradition: "All" },
+  { id: "clementine", name: "Clementine Vulgate", abbr: "VULG", year: 1592, style: "Latin", api: "bible-api", tradition: "Catholic" },
+  { id: "almeida", name: "Almeida (Portuguese)", abbr: "ALM", year: 1819, style: "Portuguese", api: "bible-api", tradition: "All" },
+  { id: "rccv", name: "Romanian Cornilescu", abbr: "RCCV", year: 1924, style: "Romanian", api: "bible-api", tradition: "All" },
+];
+
+async function fetchBibleText(ref, version = "kjv") {
+  const v = BIBLE_VERSIONS.find(b => b.id === version) || BIBLE_VERSIONS[0];
   try {
-    const r = await fetch(`https://bible-api.com/${encodeURIComponent(ref)}?translation=kjv`);
-    if (!r.ok) return { text: `Could not fetch: ${ref} (${r.status})`, ref, verses: [], error: true };
+    // bible-api.com supports: kjv, web, bbe, oeb-us, clementine, almeida, rccv
+    const url = `https://bible-api.com/${encodeURIComponent(ref)}?translation=${v.id}`;
+    const r = await fetch(url);
+    if (!r.ok) return { text: `Could not fetch: ${ref} (${r.status})`, ref, verses: [], error: true, version: v.abbr };
     const d = await r.json();
-    if (d.error) return { text: `Not found: ${ref}`, ref, verses: [], error: true };
-    return { text: d.text, ref: d.reference, verses: d.verses || [], error: false };
-  } catch { return { text: `Could not fetch: ${ref}. Check connection.`, ref, verses: [], error: true }; }
+    if (d.error) return { text: `Not found: ${ref}`, ref, verses: [], error: true, version: v.abbr };
+    return { text: d.text, ref: d.reference, verses: d.verses || [], error: false, version: v.abbr };
+  } catch { return { text: `Could not fetch: ${ref}. Check connection.`, ref, verses: [], error: true, version: v.abbr }; }
 }
 
 // ── F8: LRU Cache with timestamps ──
@@ -320,7 +340,7 @@ const LANGUAGES = [
 
 // Core UI strings for translation
 const UI_STRINGS = {
-  en: { study: "Study", bible: "Bible", sources: "Sources", shared: "Shared", doc: "Doc", generate: "Generate Sermon", welcome: "Welcome", signIn: "Sign in to start", offline: "Offline", prayer: "Prayer", closingPrayer: "Closing Prayer" },
+  en: { study: "Prepare", bible: "Bible", sources: "Tools", shared: "Community", doc: "My Sermon", generate: "Generate Sermon", welcome: "Welcome", signIn: "Sign in to start", offline: "Offline", prayer: "Prayer", closingPrayer: "Closing Prayer" },
   es: { study: "Estudio", bible: "Biblia", sources: "Fuentes", shared: "Comunidad", doc: "Doc", generate: "Generar Sermón", welcome: "Bienvenido", signIn: "Inicia sesión", offline: "Sin conexión", prayer: "Oración", closingPrayer: "Oración Final" },
   tl: { study: "Pag-aaral", bible: "Bibliya", sources: "Pinagmulan", shared: "Ibinahagi", doc: "Doc", generate: "Gumawa ng Sermon", welcome: "Maligayang pagdating", signIn: "Mag-sign in", offline: "Offline", prayer: "Panalangin", closingPrayer: "Pangwakas na Panalangin" },
   pt: { study: "Estudo", bible: "Bíblia", sources: "Fontes", shared: "Comunidade", doc: "Doc", generate: "Gerar Sermão", welcome: "Bem-vindo", signIn: "Entre para começar", offline: "Offline", prayer: "Oração", closingPrayer: "Oração Final" },
@@ -353,7 +373,7 @@ const CHARITY_CAUSES = [
   { id: "bibles", icon: "📖", name: "Bibles for All", desc: "Scripture access for unreached communities", goal: 500, color: "#c9a84c" },
   { id: "seminary", icon: "🎓", name: "Seminary Scholarships", desc: "Training for aspiring pastors", goal: 1000, color: "#5b8def" },
   { id: "orphans", icon: "🏠", name: "Orphan Care", desc: "Support orphanages worldwide", goal: 750, color: "#f87171" },
-  { id: "water", icon: "💧", name: "Living Water Wells", desc: "Clean water for communities", goal: 2000, color: "#22d3ee" },
+  { id: "water", icon: "💧", name: "Living Water Wells", desc: "Clean water for communities", goal: 2000, color: C.blue },
   { id: "missions", icon: "✈️", name: "Mission Trips", desc: "Send missionaries to unreached", goal: 1500, color: "#22c55e" },
 ];
 const MENTOR_ROLES = [
@@ -372,7 +392,7 @@ const PRAYER_CATEGORIES = [
   { id: "nations", label: "🌎 Nations", color: "#5b8def" },
   { id: "peace", label: "🕊️ Peace", color: "#22c55e" },
   { id: "church", label: "⛪ Church", color: "#f59e0b" },
-  { id: "family", label: "👨‍👩‍👧‍👦 Family", color: "#22d3ee" },
+  { id: "family", label: "👨‍👩‍👧‍👦 Family", color: C.blue },
   { id: "provision", label: "🍞 Provision", color: "#c9a84c" },
   { id: "urgent", label: "🔴 Urgent", color: "#ef4444" },
 ];
@@ -384,7 +404,7 @@ const GLOBAL_PRAYER_FOCUSES = [
   { id: "leaders", icon: "🏛️", title: "World Leaders", desc: "Wisdom and righteousness for those in authority", region: "Every Nation", verse: "1 Timothy 2:1-2", color: "#a78bfa" },
   { id: "revival", icon: "🔥", title: "Spiritual Revival", desc: "An awakening in the hearts of all people", region: "Global", verse: "2 Chronicles 7:14", color: "#22c55e" },
   { id: "disasters", icon: "🆘", title: "Natural Disasters", desc: "Communities recovering from earthquakes, floods, storms", region: "Active Zones", verse: "Psalm 46:1", color: "#ef4444" },
-  { id: "youth", icon: "🧑‍🤝‍🧑", title: "Next Generation", desc: "Young people finding faith and purpose", region: "Every School", verse: "Psalm 71:17", color: "#22d3ee" },
+  { id: "youth", icon: "🧑‍🤝‍🧑", title: "Next Generation", desc: "Young people finding faith and purpose", region: "Every School", verse: "Psalm 71:17", color: C.blue },
   { id: "unity", icon: "🤝", title: "Church Unity", desc: "One body, many parts — unity across denominations", region: "Global Body", verse: "John 17:21", color: "#c9a84c" },
 ];
 
@@ -440,11 +460,23 @@ function AppInner() {
   const [passage, setPassage] = useState("Joshua 14:6-15");
   const [passageError, setPassageError] = useState(null); // F14
   const [bibleText, setBibleText] = useState(null);
+  const [bibleVersion, setBibleVersion] = useState("kjv");
+  const [compareVersion, setCompareVersion] = useState(null); // null = off, "web" etc = side-by-side
+  const [compareText, setCompareText] = useState(null);
+  const [wordStudy, setWordStudy] = useState(null); // { word, verseRef } for tap-a-word
 
   // Study
   const [studyMode, setStudyMode] = useState(null);
   const [topic, setTopic] = useState(null);
   const [customTopic, setCustomTopic] = useState("");
+  const [showScriptureFinder, setShowScriptureFinder] = useState(false);
+  const [scriptureFindQuery, setScriptureFindQuery] = useState("");
+  const [scriptureFindResults, setScriptureFindResults] = useState([]);
+  const [selectedSources, setSelectedSources] = useState([]);
+  const [sermonContext, setSermonContext] = useState("");
+  const [compiledSermon, setCompiledSermon] = useState(null);
+  const [showNotesPreview, setShowNotesPreview] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [result, setResult] = useState(null);
   const [resultType, setResultType] = useState(null);
 
@@ -488,7 +520,19 @@ function AppInner() {
   const [hubTab, setHubTab] = useState("prayer");
   const [songRequest, setSongRequest] = useState("");
   const [songResult, setSongResult] = useState(null);
+  const [musicMode, setMusicMode] = useState("write");
+  const [worshipPlanQuery, setWorshipPlanQuery] = useState("");
+  const [worshipStyle, setWorshipStyle] = useState("contemporary");
+  const [worshipPlan, setWorshipPlan] = useState(null);
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const [discoverResult, setDiscoverResult] = useState(null);
+  const [mediaMode, setMediaMode] = useState("explore");
+  const [mediaQuery, setMediaQuery] = useState("");
+  const [mediaResult, setMediaResult] = useState(null);
   const [gameState, setGameState] = useState({ active: null, score: 0, qIdx: 0, answers: [], quizData: null });
+  const [gameMode, setGameMode] = useState("quiz"); // "quiz" | "generator" | "sworddrill"
+  const [generatedGame, setGeneratedGame] = useState(null);
+  const [gameConfig, setGameConfig] = useState({ ageGroup: "teens", groupSize: "10-20", space: "indoor", topic: "" });
   const [events, setEvents] = useState([]);
   const [eventForm, setEventForm] = useState({ title: "", type: "", date: "", desc: "" });
   const [showEventForm, setShowEventForm] = useState(false);
@@ -653,6 +697,8 @@ function AppInner() {
       const u = { name: sanitize(authForm.name, 100) || "Beloved", email, tier: authForm.tier, createdAt: new Date().toISOString() };
       setUser(u); store("sf-user", u); setAuthScreen(null);
       showToast(`Welcome, ${u.name}!`);
+      // Show onboarding for first-time users
+      if (!localStorage.getItem("lg-onboarded")) { setTimeout(() => setShowOnboarding(true), 2500); localStorage.setItem("lg-onboarded", "1"); }
       if (u.tier === "miracle") {
         await sharedAtomicUpdate("sf-miracle-count", prev => ({ count: (prev?.count || 0) + 1 }), { count: 0 });
         setMiracleCount(p => p + 1);
@@ -798,33 +844,114 @@ function AppInner() {
   }), [sermons, communityFilter]);
 
   // ── Bible fetch with cache ──
-  const loadBible = async (ref) => {
+  const loadBible = async (ref, ver) => {
     const r = ref || passage;
+    const v = ver || bibleVersion;
     if (!validatePassage(r)) return;
-    setLoading("bible", true);
+    setLoading("bible", true); setWordStudy(null);
     try {
-      const cached = cacheGet(`bible_${r}`);
-      if (cached) { setBibleText(cached); setLoading("bible", false); return; }
-      const data = await fetchBibleText(r);
-      setBibleText(data);
-      if (!data.error) cacheSet(`bible_${r}`, data);
+      const passages = r.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+      const cacheKey = `bible_${r}_${v}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) { setBibleText(cached); } else {
+        if (passages.length === 1) {
+          const data = await fetchBibleText(passages[0], v);
+          setBibleText(data);
+          if (!data.error) cacheSet(cacheKey, data);
+        } else {
+          const results = await Promise.all(passages.map(p => fetchBibleText(p, v)));
+          const combined = { ref: results.map(d => d.ref).join(' | '), text: results.map(d => d.text).join('\n\n'), verses: results.flatMap(d => d.verses || []), error: results.every(d => d.error), multi: true, version: BIBLE_VERSIONS.find(b=>b.id===v)?.abbr || "KJV" };
+          setBibleText(combined);
+          if (!combined.error) cacheSet(cacheKey, combined);
+        }
+      }
+      // Load comparison text if comparison mode is active
+      if (compareVersion && compareVersion !== v) {
+        const compKey = `bible_${r}_${compareVersion}`;
+        const compCached = cacheGet(compKey);
+        if (compCached) { setCompareText(compCached); } else {
+          if (passages.length === 1) {
+            const data = await fetchBibleText(passages[0], compareVersion);
+            setCompareText(data);
+            if (!data.error) cacheSet(compKey, data);
+          } else {
+            const results = await Promise.all(passages.map(p => fetchBibleText(p, compareVersion)));
+            const combined = { ref: results.map(d => d.ref).join(' | '), text: results.map(d => d.text).join('\n\n'), verses: results.flatMap(d => d.verses || []), error: results.every(d => d.error), multi: true, version: BIBLE_VERSIONS.find(b=>b.id===compareVersion)?.abbr };
+            setCompareText(combined);
+            if (!combined.error) cacheSet(compKey, combined);
+          }
+        }
+      } else { setCompareText(null); }
     } catch(e) { setError("Failed to load Bible text: " + e.message); } finally { setLoading("bible", false); }
   };
 
+  // ── Word Study — tap a word to see Greek/Hebrew definition ──
+  const studyWord = async (word, verseRef) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setWordStudy({ word, loading: true, data: null });
+    try {
+      const raw = await callClaude(
+        `You are a Biblical language scholar. Given a word from a Bible verse, provide its original language study. Return ONLY valid JSON: {"word":"${word}","original":"Greek or Hebrew word","transliteration":"transliterated form","strongs":"Strong's number (e.g. G26 or H430)","language":"Greek or Hebrew","definition":"concise definition","root":"root word if applicable","usage":"how it's used in this context","theological":"theological significance in 1-2 sentences","other_occurrences":["2-3 other notable verses using this word"]}`,
+        `Word: "${word}"\nFrom verse: ${verseRef}\nBible version: ${bibleVersion.toUpperCase()}\nProvide the original Greek or Hebrew word study.`
+      );
+      const parsed = parseAIJSON(raw);
+      setWordStudy({ word, loading: false, data: parsed });
+    } catch(e) { setWordStudy({ word, loading: false, data: null, error: e.message }); }
+  };
+
   // ── F3+F11: AI generation with validation + retry ──
+  // ── AI Compile Sermon — reads all doc blocks and produces a preachable sermon ──
+  const compileSermon = async () => {
+    if (docBlocks.length < 2) { showToast("Add at least 2 notes first"); return; }
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("compile", true); setCompiledSermon(null);
+    try {
+      const notes = docBlocks.map((b, i) => `[${b.label}]: ${b.content}`).join("\n\n");
+      const ctx = sermonContext ? `\nPreaching context: ${sanitize(sermonContext, 300)}` : "";
+      const raw = await callClaude(
+        `You are an expert sermon writer. You will receive a pastor's collected study notes — Scripture passages, commentary excerpts, cross-references, personal reflections, and other materials. Your job is to compile these notes into a complete, preachable sermon.\n\nWrite the sermon as flowing prose — NOT JSON. Include:\n1. A compelling opening (hook the congregation)\n2. Clear introduction of the theme\n3. 2-3 main points with Scripture references woven in\n4. Illustrations and applications from the notes\n5. A powerful conclusion with a call to action\n6. A brief closing prayer\n\nWrite in a warm, pastoral tone. The sermon should be 800-1200 words — about 10-15 minutes of preaching. Use the pastor's own notes and reflections where possible.`,
+        `Here are my study notes for this sermon:\n\nPassage(s): ${sanitize(passage, 300)}${ctx}\nTitle: ${docTitle || "Untitled"}\n\n${notes}`
+      );
+      setCompiledSermon(raw);
+      showToast("✝ Sermon compiled!");
+    } catch(e) { setError("Compile failed: " + e.message); }
+    finally { setLoading("compile", false); }
+  };
+
+  // ── Scripture Finder — describe what you need, get passage suggestions ──
+  const findScripture = async () => {
+    if (!scriptureFindQuery.trim()) return;
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("findScripture", true);
+    try {
+      const raw = await callClaude(
+        `You are a Bible scholar. Given a description of what someone is trying to articulate or a theme they want to preach about, suggest 5 relevant Bible passages. Return ONLY valid JSON: {"suggestions":[{"ref":"e.g. Romans 8:28","summary":"Brief 1-sentence description of why this passage fits"}]}`,
+        `I'm looking for Scripture about: ${sanitize(scriptureFindQuery, 200)}`
+      );
+      const parsed = parseAIJSON(raw);
+      if (parsed.suggestions && Array.isArray(parsed.suggestions)) {
+        setScriptureFindResults(parsed.suggestions.slice(0, 5));
+      } else {
+        showToast("Couldn't find passages — try rephrasing");
+      }
+    } catch(e) { showToast("Scripture search failed — " + e.message); }
+    finally { setLoading("findScripture", false); }
+  };
+
   const generate = async () => {
     if (!validatePassage(passage)) return;
     if (!(await checkAndTrack("ai"))) return;
-    const op = "generate"; const cacheKey = `gen_${studyMode}_${passage}_${topic||""}`;
+    const op = "generate"; const cacheKey = `gen_${studyMode}_${passage}_${topic||""}_${sermonContext||""}`;
     // Offline fallback
     const cached = cacheGet(cacheKey);
     if (!isOnline && cached) { setResult(cached); setResultType(studyMode); setScreen("results"); showToast("📴 From cache"); return; }
     setLoading(op, true); setError(null);
     try {
-      const p = sanitize(passage, INPUT_LIMITS.passage);
+      const p = sanitize(passage, 300);
+      const ctx = sermonContext ? `\nContext/Direction: ${sanitize(sermonContext, 300)}` : "";
       let raw;
-      if (studyMode === "sermon") { raw = await callClaude(P.sermon, `Passage: ${p}\nStyle: expository`); }
-      else { const t = topic === "Custom..." ? sanitize(customTopic, INPUT_LIMITS.topic) : topic; raw = await callClaude(P.topical, `Topic: ${t}\nStarting passage: ${p}`); }
+      if (studyMode === "sermon") { raw = await callClaude(P.sermon, `Passage(s): ${p}${ctx}\nStyle: expository`); }
+      else { const t = topic === "Custom..." ? sanitize(customTopic, INPUT_LIMITS.topic) : topic; raw = await callClaude(P.topical, `Topic: ${t}\nPassage(s): ${p}${ctx}`); }
       const parsed = parseAIJSON(raw);
       const v = studyMode === "sermon" ? validateSermon(parsed) : validateTopical(parsed);
       if (!v.valid) throw new Error(`Incomplete result: ${v.msg}. Please retry.`);
@@ -875,6 +1002,59 @@ function AppInner() {
     catch (e) { setError(e.message); } finally { setLoading("song", false); }
   };
 
+  // ── Worship Set Planner ──
+  const generateWorshipPlan = async () => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("worshipPlan", true); setWorshipPlan(null);
+    try {
+      const raw = await callClaude(
+        `You are a worship leader with 15 years of experience planning services for churches of all sizes and traditions. Generate a complete worship set list matched to a sermon theme. Include REAL songs by REAL artists that exist on Spotify. Return ONLY valid JSON:
+{"theme":"Worship theme","style":"${worshipStyle}","duration":"Total estimated time","set_list":[{"title":"Real song name","artist":"Real artist name","moment":"opening|praise|worship|response|communion|offering|closing","key":"Musical key","tempo":"Slow|Medium|Fast","scripture_connection":"How this song connects to the sermon passage","why":"Why this song fits here in the flow"}],"flow_notes":"How the set flows emotionally — energy arc from opening to closing","prayer_transitions":["Transition prayer/reading between songs 1-2","Between songs 3-4"],"spotify_playlist_name":"Suggested Spotify playlist name"}
+Include 5-7 songs. Mix well-known songs with hidden gems. Include artists from different traditions and eras.`,
+        `Sermon topic: ${sanitize(worshipPlanQuery, 300)}\nStyle: ${worshipStyle}\nSuggest real songs by real Christian artists. Include modern worship (Hillsong, Elevation, Bethel, Maverick City, Housefires, CityAlight), classic hymns (reimagined versions too), gospel (Kirk Franklin, Tasha Cobbs), and indie/alternative Christian artists.`
+      );
+      setWorshipPlan(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("worshipPlan", false); }
+  };
+
+  // ── Discover Christian Music ──
+  const discoverMusic = async () => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("discover", true); setDiscoverResult(null);
+    try {
+      const raw = await callClaude(
+        `You are a Christian music curator who knows every genre — from traditional hymns to CCM, worship, gospel, Christian hip-hop, indie folk worship, Celtic Christian (like Iona Community), Christian rock, and global worship music. Recommend REAL songs and artists. Return ONLY valid JSON:
+{"mood":"${discoverQuery}","recommendations":[{"song":"Real song title","artist":"Real artist name","emoji":"🎵","genre":"Worship|Gospel|CCM|Hymn|Indie|Hip-Hop|Folk|Rock|Global","mood":"Uplifting|Contemplative|Energetic|Peaceful|Powerful|Intimate","scripture_vibe":"A verse this song echoes","why_listen":"1 sentence on why this song is special"}],"playlist_idea":"A name and description for a Spotify playlist with these songs","deep_cut":"One lesser-known artist or song most people haven't heard but should"}
+Recommend 8-10 songs. Mix mainstream and underground. Include at least one hymn, one gospel song, one modern worship song, and one unexpected pick.`,
+        `I'm looking for: ${sanitize(discoverQuery, 200)}`
+      );
+      setDiscoverResult(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("discover", false); }
+  };
+
+  // ── Media & Learn — videos, virtual tours, courses, sermon visuals ──
+  const generateMedia = async (mode, query) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("media", true); setMediaResult(null);
+    const prompts = {
+      explore: `You are a Christian media curator and Biblical studies professor. Given a topic, recommend the best free Christian media content available online. Return ONLY valid JSON:
+{"topic":"${query}","documentaries":[{"title":"Real documentary/series name","platform":"YouTube|Netflix|Amazon|Free on web","creator":"Channel or production company","year":"Year","duration":"Runtime","description":"1-2 sentence description","url_hint":"YouTube search term to find it","scripture_connection":"Related passage"}],"youtube_channels":[{"name":"Real channel name","subscribers":"Approximate subscribers","focus":"What they cover","best_video":"Their most popular/relevant video title","url_hint":"Search term"}],"podcasts":[{"name":"Real podcast name","host":"Host name","platform":"Spotify|Apple|YouTube","episode_suggestion":"A specific episode relevant to this topic"}],"learning_path":"A suggested 5-step learning journey combining these resources"}`,
+
+      tour: `You are a Biblical archaeologist and historian who leads virtual tours of Biblical sites. Given a location or passage, create an immersive virtual tour guide. Return ONLY valid JSON:
+{"location":"${query}","modern_name":"Modern country/city name","coordinates":"Approximate lat,lng","era":"Historical period","bible_references":[{"ref":"Scripture reference","event":"What happened here"}],"tour_stops":[{"stop":"Stop name","description":"What you see here — describe it vividly as if walking through","historical_note":"Archaeological or historical fact","scripture":"Relevant verse","visual_note":"What this would look like — for the mind's eye"}],"travel_tip":"If someone actually visited today — what to know","google_earth_search":"Search term for Google Earth to see this location","artifacts":"Notable archaeological finds from this location","prayer":"A prayer to pray at this sacred place"}`,
+
+      course: `You are a seminary professor designing a free mini-course for self-study. Create a complete 5-lesson course on the given topic. Return ONLY valid JSON:
+{"course_title":"${query}","description":"Course description","level":"Beginner|Intermediate|Advanced","duration":"Total estimated study time","lessons":[{"lesson_number":1,"title":"Lesson title","objective":"What the student will learn","key_passage":"Primary Scripture for this lesson","reading":"Suggested Bible reading (chapter or section)","content":"3-4 paragraph teaching summary — the actual lesson content","discussion_questions":["Question 1","Question 2","Question 3"],"practical_application":"One thing to do this week","video_suggestion":"A real YouTube video or lecture to watch (give search term)"}],"final_project":"A capstone assignment to demonstrate understanding","certificate_verse":"A verse to memorize upon completion","next_steps":"What to study next after this course"}`,
+
+      visuals: `You are a sermon presentation designer. Given a sermon topic, create a complete visual plan for sermon slides and media. Return ONLY valid JSON:
+{"sermon_topic":"${query}","title_slide":{"title":"Sermon title","subtitle":"Scripture reference","visual":"Description of ideal background image/mood","color_scheme":"Suggested colors"},"slides":[{"slide_number":1,"heading":"Slide heading","content":"Key point or verse to display","visual_note":"What image or visual to use","speaker_note":"What the preacher says during this slide"}],"video_moments":[{"moment":"Where in the sermon to play a video","suggestion":"Description of ideal video clip","youtube_search":"Search term to find it on YouTube","duration":"Suggested length"}],"closing_slide":{"text":"Call to action or prayer","visual":"Closing visual description"},"presentation_tips":"Tips for visual preaching"}`,
+    };
+    try {
+      const raw = await callClaude(prompts[mode] || prompts.explore, `Topic: ${sanitize(query, 300)}. Be specific with real content that actually exists. Include real YouTube channels, real documentaries, real courses.`);
+      setMediaResult(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("media", false); }
+  };
+
   const startQuiz = async (cat) => {
     setLoading("quiz", true);
     try { const raw = await callClaude(P.quiz, `Category: ${cat}. Fun and challenging.`); const d = parseAIJSON(raw); setGameState({ active: cat, score: 0, qIdx: 0, answers: [], quizData: d }); }
@@ -886,6 +1066,23 @@ function AppInner() {
     const na = [...gameState.answers, { chosen: oi, correct }];
     const ns = gameState.score + (correct ? 1 : 0);
     setGameState(g => ({ ...g, qIdx: g.qIdx + 1, score: ns, answers: na }));
+  };
+
+  // ── Game Generator — custom youth group / team building games ──
+  const generateGame = async (type) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("gameGen", true); setGeneratedGame(null);
+    const ages = { kids: "ages 4-12", teens: "ages 13-18", adults: "adults 18+", mixed: "mixed ages (kids, teens, and adults together)" };
+    try {
+      const raw = await callClaude(
+        `You are an expert youth pastor and team building facilitator with 20 years of experience running church games, camps, retreats, and team building events. Generate a creative, fun ${type} game. Return ONLY valid JSON:
+{"name":"Creative game name","type":"${type}","emoji":"🎯","age_group":"${gameConfig.ageGroup}","group_size":"${gameConfig.groupSize}","space":"${gameConfig.space}","duration":"estimated time","energy_level":"Low|Medium|High","materials":["list of materials needed, or 'None' if no materials"],"scripture_tie":"A Bible verse or principle this game reinforces","setup":"How to set up the game (2-3 sentences)","rules":["Step 1: ...","Step 2: ...","Step 3: ...","Step 4: ...","Step 5: ..."],"variations":["Variation 1 for different group sizes","Variation 2 for different ages"],"debrief":["Discussion question 1 connecting game to faith","Discussion question 2","Discussion question 3"],"leader_tip":"One pro tip for the leader running this game"}`,
+        `Generate a ${type} game for ${ages[gameConfig.ageGroup] || "teens"}, group size ${gameConfig.groupSize}, ${gameConfig.space} setting.${gameConfig.topic ? ` Connect to sermon topic: ${gameConfig.topic}` : ""} Make it modern, engaging, and fun — not boring or predictable. Think escape rooms, team challenges, scavenger hunts, minute-to-win-it, not just relay races.`
+      );
+      const parsed = parseAIJSON(raw);
+      setGeneratedGame(parsed);
+    } catch(e) { setError("Game generation failed: " + e.message); }
+    finally { setLoading("gameGen", false); }
   };
 
   const postEvent = async () => {
@@ -969,7 +1166,7 @@ function AppInner() {
     { id: "revival", label: "🔥 Revival & Awakening", color: "#f59e0b" },
     { id: "humanitarian", label: "🤝 Humanitarian Aid", color: "#5b8def" },
     { id: "youth", label: "🧑‍🤝‍🧑 Youth & Education", color: "#a78bfa" },
-    { id: "science", label: "🔬 Faith & Science", color: "#22d3ee" },
+    { id: "science", label: "🔬 Faith & Science", color: C.blue },
     { id: "politics", label: "🏛️ Religious Freedom", color: "#c9a84c" },
     { id: "environment", label: "🌿 Creation Care", color: "#4ade80" },
   ];
@@ -1115,6 +1312,125 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
       const raw = await callClaude(prompts[mode] || prompts.devotion, `Generate fresh, authentic content for Christian teens. Be real. No church-speak.`);
       setTeenResult(parseAIJSON(raw));
     } catch(e) { setError(e.message); } finally { setLoading("teen", false); }
+  };
+
+  // ── Healthy Soul — Biblical Health & Nutrition ──
+  const WELLNESS_MODES = [
+    { id: "biblical-foods", icon: "🫒", title: "Biblical Foods", desc: "Explore foods from Scripture", color: "#3d7a4f" },
+    { id: "daniel-fast", icon: "🍃", title: "Daniel Fast", desc: "Fasting guides with Scripture", color: "#2c5f8a" },
+    { id: "healing-foods", icon: "🌿", title: "Healing Foods", desc: "Nutrition for body & spirit", color: "#8b6914" },
+    { id: "biblical-recipe", icon: "🍞", title: "Biblical Recipe", desc: "Cook with Scripture ingredients", color: "#b94a48" },
+    { id: "body-temple", icon: "🏛️", title: "Body Temple", desc: "Your body is a temple devotional", color: "#6b4c8a" },
+    { id: "wellness-prayer", icon: "🙏", title: "Wellness Prayer", desc: "Healing, rest, and renewal", color: "#d4a84b" },
+  ];
+
+  const [wellnessMode, setWellnessMode] = useState(null);
+  const [wellnessResult, setWellnessResult] = useState(null);
+  const [wellnessQuery, setWellnessQuery] = useState("");
+  // ── Gap closers: Discussion Qs, Reading Plans, Sermon Archive, Factbook ──
+  const [discussionQs, setDiscussionQs] = useState(null);
+  const [readingPlan, setReadingPlan] = useState(() => { try { const s = localStorage.getItem("lg-reading-plan"); return s ? JSON.parse(s) : null; } catch { return null; } });
+  const [readingPlanDay, setReadingPlanDay] = useState(() => { try { return parseInt(localStorage.getItem("lg-reading-day") || "1"); } catch { return 1; } });
+  const [sermonArchive, setSermonArchive] = useState(() => { try { const s = localStorage.getItem("lg-sermon-archive"); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [showArchive, setShowArchive] = useState(false);
+  const [factbookResult, setFactbookResult] = useState(null);
+  const [showReadingPlans, setShowReadingPlans] = useState(false);
+
+  const generateWellness = async (mode, query) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setWellnessMode(mode); setWellnessResult(null); setLoading("wellness", true); setError(null);
+    const prompts = {
+      "biblical-foods": `You are a Biblical nutrition scholar. Given a food or ingredient, provide its complete Biblical and nutritional profile. Return ONLY JSON: {"food":"${query || 'olive oil'}","emoji":"🫒","hebrew_name":"Original Hebrew/Greek name","meaning":"What the name means","bible_references":[{"ref":"Scripture reference","context":"How this food appears in the passage","significance":"Why it matters"}],"nutritional_profile":{"calories":"per serving","key_nutrients":["nutrient 1","nutrient 2","nutrient 3"],"health_benefits":["benefit 1","benefit 2","benefit 3"]},"spiritual_symbolism":"What this food represents spiritually","how_to_use":"Modern ways to incorporate this into your diet","prayer":"A short prayer of gratitude for God's provision of this food","fun_fact":"An interesting historical or scientific fact"}`,
+
+      "daniel-fast": `You are a Biblical fasting guide. Generate a personalized Daniel Fast plan. Return ONLY JSON: {"fast_name":"Daniel Fast","duration":"21 days","scripture_basis":"Daniel 1:12, Daniel 10:2-3","purpose":"${query || 'spiritual renewal and physical reset'}","what_to_eat":["Food category 1 with examples","Food category 2","Food category 3","Food category 4","Food category 5"],"what_to_avoid":["Category 1","Category 2","Category 3"],"daily_plan":[{"day":"Day 1-3","theme":"Breaking dependence","scripture":"Scripture for these days","meal_ideas":"Breakfast, lunch, dinner suggestions","prayer_focus":"What to pray about"},{"day":"Day 4-7","theme":"Deepening surrender","scripture":"...","meal_ideas":"...","prayer_focus":"..."},{"day":"Day 8-14","theme":"Seeking clarity","scripture":"...","meal_ideas":"...","prayer_focus":"..."},{"day":"Day 15-21","theme":"Breakthrough and renewal","scripture":"...","meal_ideas":"...","prayer_focus":"..."}],"breaking_the_fast":"How to safely end the fast","testimony":"An encouraging word about what God does through fasting"}`,
+
+      "healing-foods": `You are a holistic health advisor grounded in Biblical wisdom. Given a health concern, suggest Biblical foods and spiritual practices. Return ONLY JSON: {"concern":"${query || 'stress and anxiety'}","scripture_comfort":"A comforting Scripture for this condition with reference","biblical_foods":[{"food":"Food name","emoji":"🍯","scripture":"Where this food appears in the Bible","how_it_helps":"Nutritional/medical benefit","preparation":"How to prepare/consume it"}],"spiritual_practices":[{"practice":"e.g. Prayer walking, Sabbath rest","scripture":"Supporting verse","benefit":"How this helps body and soul"}],"daily_routine":{"morning":"Morning wellness practice","afternoon":"Midday practice","evening":"Evening practice"},"prayer":"A healing prayer for this specific concern","disclaimer":"Reminder to consult healthcare professionals"}`,
+
+      "biblical-recipe": `You are a creative chef who cooks with Biblical ingredients. Generate a delicious, healthy recipe using foods found in Scripture. Return ONLY JSON: {"recipe_name":"Creative name","emoji":"🍽️","description":"One sentence about this dish","servings":4,"prep_time":"15 min","cook_time":"30 min","biblical_ingredients":[{"ingredient":"e.g. 2 cups lentils","scripture":"Genesis 25:34 — Esau's stew","significance":"Brief note on this ingredient in the Bible"}],"modern_additions":["Any modern ingredients needed"],"instructions":["Step 1","Step 2","Step 3","Step 4","Step 5"],"nutritional_highlights":["High in protein","Rich in fiber"],"table_blessing":"A meal prayer connecting this food to Scripture","scripture_meditation":"A verse to meditate on while eating this meal"}`,
+
+      "body-temple": `You are a devotional writer focused on the Biblical teaching that our bodies are temples of the Holy Spirit. Write a daily devotional on ${query || 'caring for your body as worship'}. Return ONLY JSON: {"title":"Devotional title","theme":"${query || 'body as temple'}","key_verse":{"text":"Full verse text","ref":"1 Corinthians 6:19-20 or similar"},"reflection":"3-4 paragraphs exploring how caring for our physical body is an act of worship. Include references to sleep, nutrition, exercise, rest, and mental health. Be warm, practical, not preachy.","body_check":{"physical":"One physical wellness action for today","mental":"One mental wellness practice","spiritual":"One spiritual practice"},"practical_challenge":"A specific, doable challenge for this week","prayer":"A prayer for strength, discipline, and gratitude for our bodies","quote":"An inspiring quote about health and faith"}`,
+
+      "wellness-prayer": `You are a prayer guide specializing in physical, mental, and spiritual wellness. Write a guided wellness prayer for ${query || 'healing and renewal'}. Return ONLY JSON: {"title":"Prayer title","occasion":"${query || 'healing and renewal'}","opening":{"text":"Opening prayer (2-3 sentences)","posture":"Suggested physical posture (e.g. hands open, kneeling, walking)"},"body_scan":{"instruction":"Guide the person to notice their body — tension, pain, tiredness","prayer":"Prayer releasing physical burdens to God"},"mind_clearing":{"instruction":"Guide the person to notice anxious thoughts","prayer":"Prayer for mental peace, referencing Philippians 4:6-7"},"spirit_filling":{"instruction":"Guide the person to invite the Holy Spirit","prayer":"Prayer for spiritual renewal and strength"},"scripture_declarations":[{"verse":"Isaiah 53:5","declaration":"By His stripes I am healed"},{"verse":"Psalm 103:2-3","declaration":"He forgives all my sins and heals all my diseases"},{"verse":"3 John 1:2","declaration":"I prosper and am in health, even as my soul prospers"}],"closing":"Closing prayer with thanksgiving","wellness_action":"One physical wellness action to take after praying"}`,
+    };
+    try {
+      const raw = await callClaude(prompts[mode] || prompts["body-temple"], `Generate fresh, practical, Biblically-grounded content about: ${query || "wellness and health"}. Be warm, encouraging, and specific.`);
+      setWellnessResult(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("wellness", false); }
+  };
+
+  // ═══ GAP 1: Discussion Question Generator ═══
+  const generateDiscussionQs = async (ref) => {
+    const p = ref || passage;
+    if (!p?.trim()) { showToast("Enter a passage first"); return; }
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("discussion", true); setDiscussionQs(null);
+    try {
+      const raw = await callClaude(
+        `You are a Bible study leader with 20 years experience facilitating small groups. Generate discussion questions for a Bible study on a given passage. Return ONLY valid JSON:
+{"passage":"${p}","title":"Discussion title","ice_breaker":"One fun opening question to get people talking","observation":[{"q":"Question about what the text says (3 questions)","hint":"Where to look in the passage"}],"interpretation":[{"q":"Question about what the text means (3 questions)","hint":"Key insight to guide discussion"}],"application":[{"q":"Question about how to apply this today (3 questions)","hint":"Practical connection to daily life"}],"going_deeper":"One challenging question for mature believers","prayer_prompt":"A suggested closing prayer focus","leader_tip":"One tip for the discussion leader"}`,
+        `Generate discussion questions for: ${sanitize(p, 300)}${sermonContext ? `. Context: ${sanitize(sermonContext, 200)}` : ""}. Mix easy warm-up questions with deeper theological ones. Make application questions practical and personal.`
+      );
+      setDiscussionQs(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("discussion", false); }
+  };
+
+  // ═══ GAP 2: Reading Plans ═══
+  const READING_PLANS = [
+    { id: "bible-1yr", name: "Bible in 1 Year", days: 365, icon: "📖", desc: "Genesis to Revelation in 365 days" },
+    { id: "psalms-31", name: "Psalms in 31 Days", days: 31, icon: "🎵", desc: "5 Psalms per day" },
+    { id: "gospels-30", name: "Gospels in 30 Days", days: 30, icon: "✝", desc: "Walk with Jesus through all 4 Gospels" },
+    { id: "proverbs-31", name: "Proverbs in 31 Days", days: 31, icon: "💡", desc: "One chapter of wisdom per day" },
+    { id: "paul-21", name: "Paul's Letters in 21 Days", days: 21, icon: "✉️", desc: "Romans through Philemon" },
+    { id: "genesis-30", name: "Genesis in 30 Days", days: 30, icon: "🌍", desc: "The beginning of everything" },
+  ];
+
+  const startReadingPlan = async (planId) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("readingPlan", true);
+    try {
+      const plan = READING_PLANS.find(p => p.id === planId);
+      const raw = await callClaude(
+        `You are a Bible reading plan designer. Create a ${plan.days}-day reading plan for "${plan.name}". Return ONLY valid JSON:
+{"plan_name":"${plan.name}","total_days":${plan.days},"days":[{"day":1,"reading":"Book Chapter:Verse-Verse","title":"Short title for today","key_verse":"One standout verse","thought":"1-2 sentence devotional thought","prayer":"Brief prayer for today"}]. Generate ALL ${plan.days} days. Keep readings balanced — roughly equal length each day.`,
+        `Create the complete ${plan.days}-day plan. Be specific with every reading reference.`
+      );
+      const parsed = parseAIJSON(raw);
+      setReadingPlan(parsed);
+      setReadingPlanDay(1);
+      localStorage.setItem("lg-reading-plan", JSON.stringify(parsed));
+      localStorage.setItem("lg-reading-day", "1");
+      showToast(`📖 Started: ${plan.name}`);
+    } catch(e) { setError(e.message); } finally { setLoading("readingPlan", false); }
+  };
+
+  const advanceReadingDay = () => {
+    const next = readingPlanDay + 1;
+    if (next > (readingPlan?.total_days || 365)) { showToast("🎉 You completed the plan!"); return; }
+    setReadingPlanDay(next);
+    localStorage.setItem("lg-reading-day", String(next));
+  };
+
+  // ═══ GAP 3: Sermon Archive ═══
+  const saveToArchive = (sermon) => {
+    const entry = { id: Date.now(), title: sermon.title || docTitle || "Untitled Sermon", passage: passage, context: sermonContext, date: new Date().toISOString().split("T")[0], content: typeof sermon === "string" ? sermon : compiledSermon || docBlocks.map(b => `[${b.label}] ${b.content}`).join("\n\n"), occasion: "Sunday" };
+    const updated = [entry, ...sermonArchive].slice(0, 100); // Keep last 100
+    setSermonArchive(updated);
+    localStorage.setItem("lg-sermon-archive", JSON.stringify(updated));
+    showToast("📚 Saved to Sermon Archive");
+  };
+
+  // ═══ GAP 4: Factbook (People/Places/Things) ═══
+  const lookupFactbook = async (term) => {
+    if (!(await checkAndTrack("ai"))) return;
+    setLoading("factbook", true); setFactbookResult(null);
+    try {
+      const raw = await callClaude(
+        `You are a Biblical encyclopedia. Given a person, place, thing, or concept from the Bible, provide a comprehensive factbook entry. Return ONLY valid JSON:
+{"term":"${term}","type":"person|place|thing|concept|event","emoji":"relevant emoji","summary":"2-3 sentence overview","details":{"also_known_as":"Other names or titles","era":"Time period","significance":"Why this matters in Biblical narrative"},"key_scriptures":[{"ref":"Reference","context":"How this term appears here"}],"timeline":[{"event":"What happened","when":"Approximate date or period"}],"connections":[{"related":"Related person/place/thing","relationship":"How they're connected"}],"did_you_know":"One surprising fact most people don't know","sermon_angle":"How a preacher might use this in a sermon","prayer":"A prayer inspired by this person/place/concept"}`,
+        `Provide a factbook entry for: ${sanitize(term, 200)}. Be historically accurate and Biblically grounded.`
+      );
+      setFactbookResult(parseAIJSON(raw));
+    } catch(e) { setError(e.message); } finally { setLoading("factbook", false); }
   };
 
   const submitMentorPost = async () => {
@@ -1391,7 +1707,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
             ].map((step, i) => (
               <div key={i} style={{ display: "flex", gap: 12, marginBottom: 12, animation: `fadeUp ${0.3+i*0.15}s ease` }}>
                 <div style={{ width: 44, height: 44, borderRadius: 12, background: `${C.miracle}10`, border: `1px solid ${C.miracle}20`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }} role="img" aria-label={step.title}>{step.icon}</div>
-                <div><div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{step.title}</div><div style={{ fontSize: 12, color: "#9ca3af", lineHeight: 1.5 }}>{step.desc}</div></div>
+                <div><div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{step.title}</div><div style={{ fontSize: 12, color: C.dim, lineHeight: 1.5 }}>{step.desc}</div></div>
               </div>
             ))}
           </div>
@@ -1436,74 +1752,329 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
               {user && user.tier === "miracle" && (
                 <div style={{ background: `${C.miracle}08`, border: `1px solid ${C.miracle}20`, borderRadius: 8, padding: "6px 10px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 10, color: C.miracle }}>🕊️ Miracle Tier</span>
-                  <span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{usage.aiCalls}/3 AI calls today</span>
+                  <span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{usage.aiCalls}/{TIER_LIMITS[user.tier]?.aiCallsPerDay || 10} AI calls today</span>
                 </div>
               )}
               {!user && (
                 <button onClick={() => setAuthScreen("signup")} style={{ width: "100%", padding: 10, background: `${C.gold}10`, border: `1px solid ${C.gold}25`, borderRadius: 8, color: C.goldL, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font, marginBottom: 10 }}>✝ Sign in to start studying</button>
               )}
-              <div style={secH}>Scripture Passage</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: passageError ? 4 : 14 }}>
-                <input value={passage} onChange={e => { setPassage(e.target.value); setPassageError(null); }} placeholder="e.g. Joshua 14:6-15" aria-label="Bible passage" maxLength={INPUT_LIMITS.passage} style={{ ...inputS, flex: 1, borderColor: passageError ? C.red : C.border }} />
+              <div style={secH}>What are you studying?</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+                <input value={passage} onChange={e => { setPassage(e.target.value); setPassageError(null); }} placeholder="e.g. Romans 8:28 or Psalm 23, John 3:16" aria-label="Bible passages — separate multiple with commas" maxLength={300} style={{ ...inputS, flex: 1, borderColor: passageError ? C.red : C.border }} />
                 <button onClick={() => { if(validatePassage(passage)) { loadBible(); setScreen("bible"); }}} style={{ background: `${C.blue}15`, border: `1px solid ${C.blue}35`, color: C.blue, borderRadius: 8, padding: "0 14px", fontSize: 12, fontFamily: mono, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>📖 Read</button>
               </div>
-              {passageError && <p role="alert" style={{ fontSize: 11, color: C.red, margin: "0 0 10px" }}>⚠ {passageError}</p>}
+              {/* Popular passages — tap to fill */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4 }}>
+                {["John 3:16","Romans 8:28","Psalm 23","Phil 4:13","Jer 29:11","Matt 28:19","Isaiah 40:31","Prov 3:5-6","Gen 1:1","Rev 21:4"].map(p => (
+                  <button key={p} onClick={() => { setPassage(p); setPassageError(null); }} style={{ padding: "3px 8px", background: passage===p?`${C.gold}15`:C.surface, border: `1px solid ${passage===p?C.gold:C.border}`, borderRadius: 12, fontSize: 9, color: passage===p?C.gold:C.dim, cursor: "pointer" }}>{p}</button>
+                ))}
+              </div>
+              {passageError && <p role="alert" style={{ fontSize: 11, color: C.red, margin: "0 0 6px" }}>⚠ {passageError}</p>}
 
-              <div style={secH}>Study Mode</div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-                {[{ id: "sermon", icon: "🎤", label: "Sermon" }, { id: "topical", icon: "🔗", label: "Topical" }, { id: "free", icon: "📝", label: "Free" }].map(m => (
-                  <button key={m.id} onClick={() => setStudyMode(m.id)} aria-pressed={studyMode===m.id} style={{ flex: 1, padding: "14px 6px", background: studyMode===m.id?`${C.gold}12`:C.card, border: studyMode===m.id?`1px solid ${C.gold}35`:`1px solid ${C.border}`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
-                    <div style={{ fontSize: 22, marginBottom: 3 }}>{m.icon}</div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: studyMode===m.id?C.goldL:C.text }}>{m.label}</div>
+              {/* Sermon context / direction */}
+              <div style={secH}>Context / Direction <span style={{ fontWeight: 400, color: C.dim }}>(optional)</span></div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4 }}>
+                {["Sunday Sermon","Youth Group","Bible Study","Funeral","Wedding","Evangelism","Easter","Christmas","Baptism","Grief & Loss","Men's Group","Women's Group"].map(c => (
+                  <button key={c} onClick={() => setSermonContext(c)} style={{ padding: "3px 8px", background: sermonContext===c?`${C.blue}15`:C.surface, border: `1px solid ${sermonContext===c?C.blue:C.border}`, borderRadius: 12, fontSize: 9, color: sermonContext===c?C.blue:C.dim, cursor: "pointer" }}>{c}</button>
+                ))}
+              </div>
+              <input value={sermonContext} onChange={e => setSermonContext(e.target.value)} placeholder="Or type your own context..." maxLength={300} style={{ ...inputS, marginBottom: 6, fontSize: 11 }} />
+
+              {/* Scripture Finder — don't know the passage? describe what you mean */}
+              {!showScriptureFinder ? (
+                <button onClick={() => setShowScriptureFinder(true)} style={{ background: "none", border: "none", color: C.gold, fontSize: 11, cursor: "pointer", padding: "2px 0 10px", fontFamily: font, textDecoration: "underline" }}>🔍 Don't know the passage? Describe what you're looking for</button>
+              ) : (
+                <div style={{ ...cardS, padding: 10, marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, color: C.gold, fontWeight: 600, marginBottom: 6 }}>🔍 Scripture Finder</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 6 }}>
+                    {["God's plan","Comfort in grief","Forgiveness","Anxiety & peace","Healing","Strength","Marriage","Purpose","Faith & doubt","Provision"].map(s => (
+                      <button key={s} onClick={() => setScriptureFindQuery(s)} style={{ padding: "3px 8px", background: scriptureFindQuery===s?`${C.gold}15`:C.surface, border: `1px solid ${scriptureFindQuery===s?C.gold:C.border}`, borderRadius: 12, fontSize: 9, color: scriptureFindQuery===s?C.gold:C.dim, cursor: "pointer" }}>{s}</button>
+                    ))}
+                  </div>
+                  <input value={scriptureFindQuery} onChange={e => setScriptureFindQuery(e.target.value)} placeholder="Or describe what you're looking for..." maxLength={200} style={{ ...inputS, marginBottom: 6, fontSize: 12 }} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={findScripture} disabled={!scriptureFindQuery.trim() || isLoading("findScripture")} style={{ flex: 1, padding: 8, background: scriptureFindQuery.trim() ? C.gold : C.surface, border: "none", borderRadius: 6, color: scriptureFindQuery.trim() ? "#fff" : C.dim, fontSize: 12, fontWeight: 600, cursor: scriptureFindQuery.trim() ? "pointer" : "default" }}>{isLoading("findScripture") ? "⏳ Finding..." : "Find Passages"}</button>
+                    <button onClick={() => { setShowScriptureFinder(false); setScriptureFindResults([]); }} style={{ padding: "8px 12px", background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.dim, fontSize: 11, cursor: "pointer" }}>✕</button>
+                  </div>
+                  {scriptureFindResults.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 10, color: C.dim, marginBottom: 4 }}>Tap a passage to use it:</div>
+                      {scriptureFindResults.map((r, i) => (
+                        <button key={i} onClick={() => { setPassage(r.ref); setShowScriptureFinder(false); setScriptureFindResults([]); showToast(`📖 Set to ${r.ref}`); }} style={{ display: "block", width: "100%", textAlign: "left", padding: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer", marginBottom: 4 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: C.gold }}>{r.ref}</span>
+                          <span style={{ fontSize: 11, color: C.text, display: "block", marginTop: 2 }}>{r.summary}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Quick access: Prayer Wall */}
+              <button onClick={() => { setScreen("community"); setHubTab("prayer"); }} style={{ width: "100%", padding: 8, background: `${C.miracle}08`, border: `1px solid ${C.miracle}20`, borderRadius: 8, color: C.miracle, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: font, marginBottom: 14 }}>🙏 Open Prayer Wall</button>
+
+              {/* Reading Plan widget — shows if active */}
+              {readingPlan && readingPlan.days?.[readingPlanDay - 1] && (() => {
+                const today = readingPlan.days[readingPlanDay - 1];
+                return (
+                  <div style={{ ...cardS, padding: 12, marginBottom: 10, borderLeft: `3px solid ${C.green}`, background: `${C.green}04` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: C.green }}>📖 {readingPlan.plan_name}</span>
+                      <span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>Day {readingPlanDay}/{readingPlan.total_days}</span>
+                    </div>
+                    <div style={{ width: "100%", height: 3, background: C.border, borderRadius: 2, marginBottom: 6 }}><div style={{ width: `${(readingPlanDay/readingPlan.total_days)*100}%`, height: "100%", background: C.green, borderRadius: 2 }}/></div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginBottom: 2 }}>{today.title}</div>
+                    <button onClick={() => { setPassage(today.reading); loadBible(today.reading); setScreen("bible"); }} style={{ background: "none", border: "none", color: C.gold, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: font, textDecoration: "underline" }}>📖 {today.reading}</button>
+                    {today.key_verse && <p style={{ fontSize: 11, color: C.gold, margin: "4px 0", fontStyle: "italic" }}>✦ {today.key_verse}</p>}
+                    <p style={{ fontSize: 11, color: C.dim, margin: "2px 0 6px", lineHeight: 1.4 }}>{today.thought}</p>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={advanceReadingDay} style={{ flex: 1, padding: 8, background: C.green, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✅ Mark Complete</button>
+                      <button onClick={() => { setReadingPlan(null); localStorage.removeItem("lg-reading-plan"); localStorage.removeItem("lg-reading-day"); showToast("Plan cleared"); }} style={{ padding: "8px 12px", background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.dim, fontSize: 10, cursor: "pointer" }}>✕</button>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Start a Reading Plan — only show if no active plan */}
+              {!readingPlan && (
+                <div style={{ marginBottom: 10 }}>
+                  <button onClick={() => setShowReadingPlans(!showReadingPlans)} style={{ width: "100%", padding: 8, background: `${C.green}06`, border: `1px solid ${C.green}18`, borderRadius: 8, color: C.green, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>{showReadingPlans ? "✕ Close" : "📖 Start a Reading Plan"}</button>
+                  {showReadingPlans && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 6 }}>
+                    {READING_PLANS.map(p => (
+                      <button key={p.id} onClick={() => startReadingPlan(p.id)} disabled={isLoading("readingPlan")} style={{ ...cardS, cursor: "pointer", textAlign: "center", padding: 10 }}>
+                        <div style={{ fontSize: 20, marginBottom: 2 }}>{p.icon}</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{p.name}</div>
+                        <div style={{ fontSize: 9, color: C.dim }}>{p.days} days</div>
+                      </button>
+                    ))}
+                  </div>}
+                  {isLoading("readingPlan") && <p style={{ textAlign: "center", color: C.dim, fontSize: 11, marginTop: 4 }}>⏳ Building your plan...</p>}
+                </div>
+              )}
+
+              <div style={secH}>What do you need?</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                {[
+                  { id: "sermon", icon: "🎤", label: "Generate Sermon", desc: "AI builds a 3-point outline", color: C.gold },
+                  { id: "topical", icon: "🔗", label: "Topical Study", desc: "Explore a theme across Scripture", color: C.blue },
+                ].map(m => (
+                  <button key={m.id} onClick={() => { setStudyMode(m.id); if (m.id === "sermon" && passage) generate(); }} aria-pressed={studyMode===m.id} style={{ flex: 1, padding: "14px 8px", background: C.card, border: `1px solid ${m.color}30`, borderRadius: 12, cursor: "pointer", textAlign: "center" }}>
+                    <div style={{ fontSize: 24, marginBottom: 4 }}>{m.icon}</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: m.color }}>{m.label}</div>
+                    <div style={{ fontSize: 10, color: C.dim, marginTop: 2 }}>{m.desc}</div>
                   </button>
                 ))}
               </div>
 
+              {/* Open Bible button — always visible */}
+              <button onClick={() => { if(passage) { loadBible(); setScreen("bible"); } else { setScreen("bible"); } }} style={{ width: "100%", padding: 12, background: `${C.blue}08`, border: `1px solid ${C.blue}20`, borderRadius: 10, color: C.blue, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: font, marginBottom: 6 }}>📖 Open Bible {passage ? `(${passage})` : ""}</button>
+
+              {/* Discussion Questions button */}
+              <button onClick={() => generateDiscussionQs()} disabled={isLoading("discussion") || !passage?.trim()} style={{ width: "100%", padding: 10, background: passage?.trim() ? `${C.purple}08` : C.surface, border: `1px solid ${passage?.trim() ? C.purple : C.border}20`, borderRadius: 10, color: passage?.trim() ? C.purple : C.dim, fontSize: 12, fontWeight: 600, cursor: passage?.trim() ? "pointer" : "default", fontFamily: font, marginBottom: 10 }}>{isLoading("discussion") ? "⏳ Generating questions..." : "💬 Generate Discussion Questions"}</button>
+
+              {/* Discussion Questions results */}
+              {discussionQs && (
+                <div style={{ ...cardS, borderLeft: `3px solid ${C.purple}`, marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: C.purple }}>💬 {discussionQs.title}</span>
+                    <button onClick={() => setDiscussionQs(null)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer" }}>✕</button>
+                  </div>
+                  {discussionQs.ice_breaker && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginBottom: 6 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>ICE BREAKER</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>🎯 {discussionQs.ice_breaker}</p></div>}
+                  {[{k:"observation",title:"📖 Observation",color:C.blue,sub:"What does the text say?"},{k:"interpretation",title:"🔍 Interpretation",color:C.purple,sub:"What does it mean?"},{k:"application",title:"✅ Application",color:C.green,sub:"How do I live it?"}].map(sec => (
+                    <div key={sec.k} style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: sec.color, marginBottom: 3 }}>{sec.title} <span style={{ fontSize: 9, color: C.dim, fontWeight: 400 }}>— {sec.sub}</span></div>
+                      {discussionQs[sec.k]?.map((q, i) => (
+                        <div key={i} style={{ background: C.surface, borderRadius: 6, padding: 6, marginBottom: 3 }}>
+                          <p style={{ fontSize: 12, color: C.text, margin: 0 }}>{q.q}</p>
+                          {q.hint && <p style={{ fontSize: 9, color: C.dim, margin: "2px 0 0", fontStyle: "italic" }}>💡 {q.hint}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                  {discussionQs.going_deeper && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 6, marginBottom: 6 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>GOING DEEPER</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>{discussionQs.going_deeper}</p></div>}
+                  {discussionQs.leader_tip && <p style={{ fontSize: 10, color: C.green, margin: "4px 0" }}>💡 Leader tip: {discussionQs.leader_tip}</p>}
+                  <AddBtn label="Discussion Questions" content={`${discussionQs.title}\n\nIce Breaker: ${discussionQs.ice_breaker}\n\nObservation:\n${discussionQs.observation?.map(q=>q.q).join('\n')}\n\nInterpretation:\n${discussionQs.interpretation?.map(q=>q.q).join('\n')}\n\nApplication:\n${discussionQs.application?.map(q=>q.q).join('\n')}`} />
+                  <AIDisclaimer type="discussion" />
+                </div>
+              )}
+
+              {/* Topical topic selector — only shows when topical selected */}
               {studyMode === "topical" && (
                 <>
                   <div style={secH}>Topic</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 14 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
                     {TOPICS.map(t => <button key={t} onClick={() => setTopic(t)} aria-pressed={topic===t} style={{ ...tagS(topic===t?C.blue:C.dim), cursor: "pointer", background: topic===t?`${C.blue}18`:C.card }}>{t}</button>)}
                   </div>
-                  {topic === "Custom..." && <input value={customTopic} onChange={e => setCustomTopic(e.target.value)} placeholder="Your topic..." maxLength={INPUT_LIMITS.topic} style={{ ...inputS, marginBottom: 14 }} />}
+                  {topic === "Custom..." && <input value={customTopic} onChange={e => setCustomTopic(e.target.value)} placeholder="Your topic..." maxLength={INPUT_LIMITS.topic} style={{ ...inputS, marginBottom: 10 }} />}
+                  <button onClick={generate} disabled={isLoading("generate")} style={{ width: "100%", padding: 14, background: isLoading("generate") ? C.card : `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 10, color: isLoading("generate") ? C.dim : "#fff", fontSize: 15, fontWeight: 700, cursor: isLoading("generate") ? "default" : "pointer", fontFamily: font, marginBottom: 8 }}>{isLoading("generate") ? "⏳ Building Study..." : "⚡ Build Study"}</button>
                 </>
               )}
 
-              {studyMode && studyMode !== "free" && (
-                <button onClick={generate} disabled={isLoading("generate")} aria-busy={isLoading("generate")} style={{
-                  width: "100%", padding: 14, background: isLoading("generate") ? C.card : `linear-gradient(135deg, ${C.gold}, #a0832e)`,
-                  border: "none", borderRadius: 10, color: isLoading("generate") ? C.dim : "#fff",
-                  fontSize: 15, fontWeight: 700, cursor: isLoading("generate") ? "default" : "pointer", fontFamily: font, marginBottom: 8,
-                }}>{isLoading("generate") ? "⏳ Generating..." : studyMode === "sermon" ? "⚡ Generate Sermon" : "⚡ Build Study"}</button>
-              )}
-              {studyMode === "free" && <button onClick={() => setScreen("sources")} style={{ width: "100%", padding: 14, background: `${C.blue}12`, border: `1px solid ${C.blue}30`, borderRadius: 10, color: C.blue, fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: font }}>📚 Open Sources</button>}
+              {/* Quick access row — Prayer, Briefing, End Session */}
+              <div style={{ display: "flex", gap: 6, marginTop: 6, marginBottom: 10 }}>
+                <button onClick={() => { setScreen("community"); setHubTab("prayer"); }} style={{ flex: 1, padding: 10, background: `${C.miracle}06`, border: `1px solid ${C.miracle}18`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
+                  <div style={{ fontSize: 18 }}>🙏</div>
+                  <div style={{ fontSize: 9, color: C.miracle, fontWeight: 600 }}>Prayer Wall</div>
+                </button>
+                <button onClick={briefing ? () => setShowBriefing(true) : generateBriefing} disabled={isLoading("briefing")} style={{ flex: 1, padding: 10, background: `${C.blue}06`, border: `1px solid ${C.blue}18`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
+                  <div style={{ fontSize: 18 }}>📰</div>
+                  <div style={{ fontSize: 9, color: C.blue, fontWeight: 600 }}>{briefing ? "Briefing" : "Get Briefing"}</div>
+                </button>
+                <button onClick={() => setScreen("sources")} style={{ flex: 1, padding: 10, background: `${C.purple}06`, border: `1px solid ${C.purple}18`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
+                  <div style={{ fontSize: 18 }}>📚</div>
+                  <div style={{ fontSize: 9, color: C.purple, fontWeight: 600 }}>Sources</div>
+                </button>
+                <button onClick={endSession} style={{ flex: 1, padding: 10, background: `${C.purple}06`, border: `1px solid ${C.purple}18`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
+                  <div style={{ fontSize: 18 }}>✝</div>
+                  <div style={{ fontSize: 9, color: C.purple, fontWeight: 600 }}>End + Pray</div>
+                </button>
+              </div>
             </div>
           )}
 
           {/* BIBLE */}
           {screen === "bible" && (
             <div style={{ animation: "fadeUp 0.3s ease" }}>
-              <button onClick={() => setScreen("home")} style={{ background: "none", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: "0 0 10px", fontFamily: font }}>← Back</button>
-              <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-                <input value={passage} onChange={e => { setPassage(e.target.value); setPassageError(null); }} placeholder="e.g. John 3:16" maxLength={INPUT_LIMITS.passage} style={{ ...inputS, flex: 1, borderColor: passageError ? C.red : C.border }} />
+              <button onClick={() => setScreen("home")} style={{ background: "none", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: "0 0 8px", fontFamily: font }}>← Back</button>
+
+              {/* Passage input */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                <input value={passage} onChange={e => { setPassage(e.target.value); setPassageError(null); }} placeholder="e.g. Romans 8:28, John 3:16" maxLength={300} style={{ ...inputS, flex: 1, borderColor: passageError ? C.red : C.border }} />
                 <button onClick={() => loadBible()} style={{ background: `${C.blue}15`, border: `1px solid ${C.blue}35`, color: C.blue, borderRadius: 8, padding: "0 14px", fontSize: 12, fontFamily: mono, cursor: "pointer" }}>Go</button>
               </div>
-              {passageError && <p role="alert" style={{ fontSize: 11, color: C.red, margin: "0 0 8px" }}>⚠ {passageError}</p>}
-              {isLoading("bible") && <p style={{ color: C.dim, textAlign: "center", padding: "20px 0" }}>Loading...</p>}
+              {passageError && <p role="alert" style={{ fontSize: 11, color: C.red, margin: "0 0 6px" }}>⚠ {passageError}</p>}
+
+              {/* Version selector + Compare toggle */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                <select value={bibleVersion} onChange={e => { setBibleVersion(e.target.value); if (passage && bibleText) loadBible(null, e.target.value); }} style={{ ...inputS, flex: 1, fontSize: 12, padding: "6px 8px", minWidth: 120 }}>
+                  {BIBLE_VERSIONS.map(v => <option key={v.id} value={v.id}>{v.abbr} — {v.name} ({v.year})</option>)}
+                </select>
+                <button onClick={() => { if (compareVersion) { setCompareVersion(null); setCompareText(null); } else { const alt = bibleVersion === "kjv" ? "web" : "kjv"; setCompareVersion(alt); if (bibleText) loadBible(null, bibleVersion); } }} style={{ padding: "6px 12px", background: compareVersion ? `${C.blue}15` : C.surface, border: `1px solid ${compareVersion ? C.blue : C.border}`, borderRadius: 6, color: compareVersion ? C.blue : C.dim, fontSize: 10, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
+                  {compareVersion ? `✕ Compare` : `📊 Compare`}
+                </button>
+              </div>
+
+              {/* Comparison version selector */}
+              {compareVersion && (
+                <select value={compareVersion} onChange={e => { setCompareVersion(e.target.value); if (bibleText) loadBible(null, bibleVersion); }} style={{ ...inputS, width: "100%", fontSize: 12, padding: "6px 8px", marginBottom: 10 }}>
+                  {BIBLE_VERSIONS.filter(v => v.id !== bibleVersion).map(v => <option key={v.id} value={v.id}>{v.abbr} — {v.name}</option>)}
+                </select>
+              )}
+
+              {isLoading("bible") && <p style={{ color: C.dim, textAlign: "center", padding: "20px 0" }}>Loading {BIBLE_VERSIONS.find(v=>v.id===bibleVersion)?.abbr}...</p>}
+
               {bibleText && !isLoading("bible") && (
-                <div style={{ ...cardS, padding: 16 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                    <h2 style={{ fontSize: 16, fontWeight: 700, color: C.goldL, margin: 0 }}>📖 {bibleText.ref}</h2>
-                    <AddBtn label={`Scripture: ${bibleText.ref}`} content={bibleText.text} />
-                  </div>
-                  {bibleText.verses?.length > 0 ? bibleText.verses.map((v, i) => (
-                    <div key={i} style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "flex-start" }}>
-                      <span style={{ fontSize: 10, color: C.gold, fontFamily: mono, fontWeight: 700, minWidth: 18, paddingTop: 3 }}>{v.verse}</span>
-                      <p style={{ fontSize: 15, color: "#e2e8f0", margin: 0, lineHeight: 1.8, flex: 1 }}>{v.text}</p>
+                <>
+                  {/* Main Bible text */}
+                  <div style={{ ...cardS, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <h2 style={{ fontSize: 15, fontWeight: 700, color: C.goldL, margin: 0 }}>📖 {bibleText.ref} <span style={{ fontSize: 10, color: C.dim, fontWeight: 400 }}>({bibleText.version || "KJV"})</span></h2>
+                      <AddBtn label={`${bibleText.ref} (${bibleText.version || "KJV"})`} content={bibleText.text} />
                     </div>
-                  )) : <p style={{ fontSize: 15, color: "#e2e8f0", margin: 0, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{bibleText.text}</p>}
-                  <button onClick={() => addToDoc("scripture", `${bibleText.ref}`, bibleText.text)} style={{ width: "100%", marginTop: 12, padding: 10, background: `${C.green}12`, border: `1px solid ${C.green}30`, borderRadius: 8, color: C.green, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}>+ Add to Doc</button>
-                </div>
+                    {bibleText.verses?.length > 0 ? bibleText.verses.map((v, i) => (
+                      <div key={i} style={{ marginBottom: 6, display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <button onClick={() => { /* Cross-ref: tap verse number */ fetchSource("references"); }} style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                          <span style={{ fontSize: 10, color: C.gold, fontFamily: mono, fontWeight: 700, minWidth: 18, paddingTop: 3 }}>{v.verse}</span>
+                        </button>
+                        <p style={{ fontSize: 15, color: C.text, margin: 0, lineHeight: 1.8, flex: 1 }}>
+                          {v.text.split(/\s+/).map((word, wi) => (
+                            <span key={wi}>
+                              <span onClick={() => studyWord(word.replace(/[.,;:!?'"]/g, ''), `${bibleText.ref}:${v.verse}`)} style={{ cursor: "pointer", borderBottom: wordStudy?.word === word.replace(/[.,;:!?'"]/g, '') ? `2px solid ${C.gold}` : "none" }}>{word}</span>{" "}
+                            </span>
+                          ))}
+                        </p>
+                      </div>
+                    )) : <p style={{ fontSize: 15, color: C.text, margin: 0, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{bibleText.text}</p>}
+                    <p style={{ fontSize: 9, color: C.dim, marginTop: 8, textAlign: "center" }}>Tap any word for Greek/Hebrew study • Tap verse number for cross-references</p>
+                  </div>
+
+                  {/* Side-by-side comparison */}
+                  {compareText && (
+                    <div style={{ ...cardS, padding: 14, marginTop: 8, borderLeft: `3px solid ${C.blue}` }}>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, color: C.blue, margin: "0 0 8px" }}>📊 {compareText.ref} <span style={{ fontSize: 10, color: C.dim, fontWeight: 400 }}>({compareText.version})</span></h3>
+                      {compareText.verses?.length > 0 ? compareText.verses.map((v, i) => (
+                        <div key={i} style={{ marginBottom: 6, display: "flex", gap: 8, alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 10, color: C.blue, fontFamily: mono, fontWeight: 700, minWidth: 18, paddingTop: 3 }}>{v.verse}</span>
+                          <p style={{ fontSize: 14, color: C.text, margin: 0, lineHeight: 1.7, flex: 1 }}>{v.text}</p>
+                        </div>
+                      )) : <p style={{ fontSize: 14, color: C.text, margin: 0, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{compareText.text}</p>}
+                      <AddBtn label={`${compareText.ref} (${compareText.version})`} content={compareText.text} />
+                    </div>
+                  )}
+
+                  {/* Word Study panel — appears when a word is tapped */}
+                  {wordStudy && (
+                    <div style={{ ...cardS, padding: 14, marginTop: 8, borderLeft: `3px solid ${C.purple}`, background: `${C.purple}05` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: C.purple }}>🔤 Word Study: "{wordStudy.word}"</span>
+                        <button onClick={() => setWordStudy(null)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14 }}>✕</button>
+                      </div>
+                      {wordStudy.loading && <p style={{ fontSize: 12, color: C.dim }}>Studying word...</p>}
+                      {wordStudy.error && <p style={{ fontSize: 12, color: C.red }}>⚠ {wordStudy.error}</p>}
+                      {wordStudy.data && (
+                        <>
+                          <div style={{ display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+                            <div style={{ background: `${C.purple}10`, borderRadius: 8, padding: "6px 10px" }}>
+                              <div style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>ORIGINAL</div>
+                              <div style={{ fontSize: 16, fontWeight: 700, color: C.purple }}>{wordStudy.data.original}</div>
+                              <div style={{ fontSize: 10, color: C.dim }}>{wordStudy.data.transliteration}</div>
+                            </div>
+                            <div style={{ background: `${C.gold}10`, borderRadius: 8, padding: "6px 10px" }}>
+                              <div style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>STRONG'S</div>
+                              <div style={{ fontSize: 14, fontWeight: 700, color: C.gold, fontFamily: mono }}>{wordStudy.data.strongs}</div>
+                              <div style={{ fontSize: 10, color: C.dim }}>{wordStudy.data.language}</div>
+                            </div>
+                          </div>
+                          <p style={{ fontSize: 13, color: C.text, margin: "0 0 6px", lineHeight: 1.6 }}><strong>Definition:</strong> {wordStudy.data.definition}</p>
+                          {wordStudy.data.root && <p style={{ fontSize: 12, color: C.dim, margin: "0 0 4px" }}>Root: {wordStudy.data.root}</p>}
+                          <p style={{ fontSize: 12, color: C.text, margin: "0 0 6px", lineHeight: 1.5 }}><strong>In this context:</strong> {wordStudy.data.usage}</p>
+                          <p style={{ fontSize: 12, color: C.gold, margin: "0 0 6px", fontStyle: "italic", lineHeight: 1.5 }}>↳ {wordStudy.data.theological}</p>
+                          {wordStudy.data.other_occurrences?.length > 0 && (
+                            <div style={{ marginTop: 4 }}>
+                              <span style={{ fontSize: 10, color: C.dim, fontFamily: mono }}>ALSO FOUND IN:</span>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3 }}>
+                                {wordStudy.data.other_occurrences.map((occ, i) => (
+                                  <button key={i} onClick={() => { setPassage(occ); loadBible(occ); }} style={{ background: `${C.blue}10`, border: `1px solid ${C.blue}20`, borderRadius: 12, padding: "2px 8px", fontSize: 10, color: C.blue, cursor: "pointer" }}>{occ}</button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <AddBtn label={`Word: ${wordStudy.data.original} (${wordStudy.data.strongs})`} content={`${wordStudy.word} — ${wordStudy.data.original} (${wordStudy.data.transliteration}) ${wordStudy.data.strongs}: ${wordStudy.data.definition}\nTheological: ${wordStudy.data.theological}`} />
+                          <button onClick={() => lookupFactbook(wordStudy.word)} disabled={isLoading("factbook")} style={{ width: "100%", marginTop: 6, padding: 8, background: `${C.blue}08`, border: `1px solid ${C.blue}20`, borderRadius: 6, color: C.blue, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>{isLoading("factbook") ? "⏳ Looking up..." : `📘 Factbook: Who/What is "${wordStudy.word}"?`}</button>
+                          <AIDisclaimer type="lexicon" />
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Factbook panel */}
+                  {factbookResult && (
+                    <div style={{ ...cardS, padding: 14, marginTop: 8, borderLeft: `3px solid ${C.blue}`, background: `${C.blue}04` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: C.blue }}>📘 {factbookResult.emoji} {factbookResult.term}</span>
+                        <button onClick={() => setFactbookResult(null)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer" }}>✕</button>
+                      </div>
+                      <span style={{ ...tagS(C.blue), fontSize: 9 }}>{factbookResult.type}</span>
+                      <p style={{ fontSize: 13, color: C.text, margin: "6px 0", lineHeight: 1.6 }}>{factbookResult.summary}</p>
+                      {factbookResult.details && <div style={{ marginBottom: 6 }}>
+                        {factbookResult.details.also_known_as && <p style={{ fontSize: 10, color: C.dim, margin: "2px 0" }}>Also known as: {factbookResult.details.also_known_as}</p>}
+                        {factbookResult.details.era && <p style={{ fontSize: 10, color: C.dim, margin: "2px 0" }}>Era: {factbookResult.details.era}</p>}
+                        <p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.5 }}>{factbookResult.details.significance}</p>
+                      </div>}
+                      {factbookResult.key_scriptures?.map((s,i) => <div key={i} style={{ background: `${C.gold}06`, borderRadius: 6, padding: 6, marginBottom: 3 }}><span style={{ fontSize: 10, color: C.gold, fontWeight: 700 }}>{s.ref}</span><span style={{ fontSize: 11, color: C.text, marginLeft: 6 }}>{s.context}</span></div>)}
+                      {factbookResult.timeline?.length > 0 && <div style={{ marginTop: 6 }}><span style={{ fontSize: 9, color: C.dim, fontWeight: 700, fontFamily: mono }}>TIMELINE</span>{factbookResult.timeline.map((t,i) => <p key={i} style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>• {t.when}: {t.event}</p>)}</div>}
+                      {factbookResult.did_you_know && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 6, marginTop: 6 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>DID YOU KNOW?</span><p style={{ fontSize: 11, color: C.text, margin: "2px 0 0" }}>{factbookResult.did_you_know}</p></div>}
+                      {factbookResult.sermon_angle && <p style={{ fontSize: 10, color: C.purple, marginTop: 6 }}>🎤 Sermon angle: {factbookResult.sermon_angle}</p>}
+                      <AddBtn label={`Factbook: ${factbookResult.term}`} content={`${factbookResult.term} (${factbookResult.type}): ${factbookResult.summary}\n\n${factbookResult.key_scriptures?.map(s=>s.ref+': '+s.context).join('\n')}\n\nSermon angle: ${factbookResult.sermon_angle}`} />
+                    </div>
+                  )}
+
+                  {/* Quick actions */}
+                  <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                    <button onClick={() => addToDoc("scripture", `${bibleText.ref} (${bibleText.version || "KJV"})`, bibleText.text)} style={{ flex: 1, padding: 10, background: `${C.green}12`, border: `1px solid ${C.green}30`, borderRadius: 8, color: C.green, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>+ Add to Sermon Notes</button>
+                    <button onClick={() => setScreen("sources")} style={{ flex: 1, padding: 10, background: `${C.blue}12`, border: `1px solid ${C.blue}30`, borderRadius: 8, color: C.blue, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>📚 Sources</button>
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -1514,9 +2085,31 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
               {!activeSource ? (
                 <>
                   <button onClick={() => setScreen("home")} style={{ background: "none", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: "0 0 10px", fontFamily: font }}>← Back</button>
-                  <h2 style={{ fontSize: 16, fontWeight: 600, color: C.goldL, margin: "0 0 12px" }}>📚 Sources for {passage}</h2>
+                  <h2 style={{ fontSize: 16, fontWeight: 600, color: C.goldL, margin: "0 0 4px" }}>📚 Sources for {passage}</h2>
+                  <p style={{ fontSize: 11, color: C.dim, margin: "0 0 10px" }}>Tap any source to view it. Or select multiple and generate together.</p>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    {SOURCES.map(s => <button key={s.id} onClick={() => fetchSource(s.id)} aria-label={`Load ${s.label}`} style={{ ...cardS, cursor: "pointer", textAlign: "left", padding: "14px 10px" }}><div style={{ fontSize: 22, marginBottom: 4 }}>{s.icon}</div><div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{s.label}</div></button>)}
+                    {SOURCES.map(s => {
+                      const selected = (selectedSources || []).includes(s.id);
+                      return <button key={s.id} onClick={() => {
+                        if (selectedSources && selectedSources.length > 0) {
+                          // Multi-select mode
+                          setSelectedSources(prev => prev.includes(s.id) ? prev.filter(x => x !== s.id) : [...prev, s.id]);
+                        } else {
+                          // Single tap — load immediately
+                          fetchSource(s.id);
+                        }
+                      }} onLongPress={() => setSelectedSources([s.id])}
+                      aria-label={`Load ${s.label}`} style={{ ...cardS, cursor: "pointer", textAlign: "left", padding: "14px 10px", border: selected ? `2px solid ${C.gold}` : `1px solid ${C.border}`, background: selected ? `${C.gold}08` : C.card }}>
+                        <div style={{ fontSize: 22, marginBottom: 4 }}>{s.icon}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{s.label}</div>
+                      </button>;
+                    })}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <button onClick={() => setSelectedSources(selectedSources && selectedSources.length > 0 ? [] : SOURCES.map(s => s.id))} style={{ flex: 1, padding: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, color: C.dim, fontSize: 11, cursor: "pointer" }}>{selectedSources && selectedSources.length > 0 ? "Clear Selection" : "Select Multiple"}</button>
+                    {selectedSources && selectedSources.length > 0 && (
+                      <button onClick={async () => { for (const id of selectedSources) { await fetchSource(id); } setSelectedSources([]); }} style={{ flex: 1, padding: 8, background: C.gold, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Generate {selectedSources.length} Selected</button>
+                    )}
                   </div>
                 </>
               ) : (
@@ -1526,12 +2119,12 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                   {sourceResult && (
                     <div>
                       <h3 style={{ fontSize: 15, fontWeight: 600, color: SOURCES.find(s=>s.id===activeSource)?.color, margin: "0 0 10px" }}>{SOURCES.find(s=>s.id===activeSource)?.icon} {SOURCES.find(s=>s.id===activeSource)?.label}: {passage}</h3>
-                      {activeSource === "commentary" && sourceResult.entries?.map((e,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 10, color: C.gold, fontFamily: mono, fontWeight: 700 }}>{e.verse}</span><p style={{ fontSize: 13, color: "#cbd5e1", margin: "4px 0 0", lineHeight: 1.7 }}>{e.text}</p></div><AddBtn small label={`CMT ${e.verse}`} content={`${e.verse}: ${e.text}`} /></div></div>)}
-                      {activeSource === "lexicon" && sourceResult.words?.map((w,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><div style={{ fontSize: 14, fontWeight: 600, color: C.goldL }}>{w.english}</div><div style={{ fontSize: 11, color: C.purple, fontFamily: mono }}>{w.original} ({w.transliteration}) • {w.strongs}</div><p style={{ fontSize: 12, color: "#cbd5e1", margin: "4px 0", lineHeight: 1.5 }}>{w.definition}</p>{w.theological_significance && <p style={{ fontSize: 11, color: C.gold, margin: 0, fontStyle: "italic" }}>↳ {w.theological_significance}</p>}</div><AddBtn small label={w.english} content={`${w.english} (${w.original}) ${w.strongs}: ${w.definition}`} /></div></div>)}
-                      {activeSource === "compare" && sourceResult.translations?.map((t,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={tagS(C.blue)}>{t.version}</span><p style={{ fontSize: 14, color: "#e2e8f0", margin: "6px 0", lineHeight: 1.7 }}>{t.text}</p>{t.note && <p style={{ fontSize: 10, color: C.dim, margin: 0, fontStyle: "italic" }}>{t.note}</p>}</div><AddBtn small label={t.version} content={`[${t.version}] ${t.text}`} /></div></div>)}
-                      {activeSource === "dictionary" && sourceResult.entries?.map((e,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{e.term}</span><span style={{ fontSize: 9, color: C.red, fontFamily: mono, marginLeft: 6, textTransform: "uppercase" }}>{e.category}</span><p style={{ fontSize: 12, color: "#cbd5e1", margin: "4px 0 0", lineHeight: 1.6 }}>{e.definition}</p></div><AddBtn small label={e.term} content={`${e.term}: ${e.definition}`} /></div></div>)}
-                      {activeSource === "references" && sourceResult.groups?.map((g,i) => <div key={i} style={{ marginBottom: 10 }}><div style={{ fontSize: 12, fontWeight: 600, color: "#22d3ee", marginBottom: 4 }}>{g.theme}</div>{g.refs?.map((r,j) => <div key={j} style={{ ...cardS, display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 11, color: C.gold, fontFamily: mono, fontWeight: 700 }}>{r.ref}</span> <span style={{ fontSize: 11, color: "#9ca3af" }}>{r.connection}</span></div><AddBtn small label={r.ref} content={`${r.ref}: ${r.connection}`} /></div>)}</div>)}
-                      {activeSource === "devotional" && <><div style={cardS}><div style={{ fontSize: 15, fontWeight: 600, color: "#86efac", marginBottom: 6 }}>{sourceResult.theme}</div><p style={{ fontSize: 13, color: "#cbd5e1", margin: 0, lineHeight: 1.8, whiteSpace: "pre-line" }}>{sourceResult.reflection}</p></div>{sourceResult.prayer && <div style={{ ...cardS, borderLeft: `3px solid ${C.purple}` }}><span style={{ fontSize: 9, color: C.purple, fontFamily: mono, fontWeight: 700 }}>PRAYER</span><p style={{ fontSize: 13, color: "#cbd5e1", margin: "4px 0 0", fontStyle: "italic", lineHeight: 1.7 }}>{sourceResult.prayer}</p></div>}</>}
+                      {activeSource === "commentary" && sourceResult.entries?.map((e,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 10, color: C.gold, fontFamily: mono, fontWeight: 700 }}>{e.verse}</span><p style={{ fontSize: 13, color: C.text, margin: "4px 0 0", lineHeight: 1.7 }}>{e.text}</p></div><AddBtn small label={`CMT ${e.verse}`} content={`${e.verse}: ${e.text}`} /></div></div>)}
+                      {activeSource === "lexicon" && sourceResult.words?.map((w,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><div style={{ fontSize: 14, fontWeight: 600, color: C.goldL }}>{w.english}</div><div style={{ fontSize: 11, color: C.purple, fontFamily: mono }}>{w.original} ({w.transliteration}) • {w.strongs}</div><p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.5 }}>{w.definition}</p>{w.theological_significance && <p style={{ fontSize: 11, color: C.gold, margin: 0, fontStyle: "italic" }}>↳ {w.theological_significance}</p>}</div><AddBtn small label={w.english} content={`${w.english} (${w.original}) ${w.strongs}: ${w.definition}`} /></div></div>)}
+                      {activeSource === "compare" && sourceResult.translations?.map((t,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={tagS(C.blue)}>{t.version}</span><p style={{ fontSize: 14, color: C.text, margin: "6px 0", lineHeight: 1.7 }}>{t.text}</p>{t.note && <p style={{ fontSize: 10, color: C.dim, margin: 0, fontStyle: "italic" }}>{t.note}</p>}</div><AddBtn small label={t.version} content={`[${t.version}] ${t.text}`} /></div></div>)}
+                      {activeSource === "dictionary" && sourceResult.entries?.map((e,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{e.term}</span><span style={{ fontSize: 9, color: C.red, fontFamily: mono, marginLeft: 6, textTransform: "uppercase" }}>{e.category}</span><p style={{ fontSize: 12, color: C.text, margin: "4px 0 0", lineHeight: 1.6 }}>{e.definition}</p></div><AddBtn small label={e.term} content={`${e.term}: ${e.definition}`} /></div></div>)}
+                      {activeSource === "references" && sourceResult.groups?.map((g,i) => <div key={i} style={{ marginBottom: 10 }}><div style={{ fontSize: 12, fontWeight: 600, color: C.blue, marginBottom: 4 }}>{g.theme}</div>{g.refs?.map((r,j) => <div key={j} style={{ ...cardS, display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 11, color: C.gold, fontFamily: mono, fontWeight: 700 }}>{r.ref}</span> <span style={{ fontSize: 11, color: C.dim }}>{r.connection}</span></div><AddBtn small label={r.ref} content={`${r.ref}: ${r.connection}`} /></div>)}</div>)}
+                      {activeSource === "devotional" && <><div style={cardS}><div style={{ fontSize: 15, fontWeight: 600, color: C.green, marginBottom: 6 }}>{sourceResult.theme}</div><p style={{ fontSize: 13, color: C.text, margin: 0, lineHeight: 1.8, whiteSpace: "pre-line" }}>{sourceResult.reflection}</p></div>{sourceResult.prayer && <div style={{ ...cardS, borderLeft: `3px solid ${C.purple}` }}><span style={{ fontSize: 9, color: C.purple, fontFamily: mono, fontWeight: 700 }}>PRAYER</span><p style={{ fontSize: 13, color: C.text, margin: "4px 0 0", fontStyle: "italic", lineHeight: 1.7 }}>{sourceResult.prayer}</p></div>}</>}
                       <AIDisclaimer type={activeSource} />
                     </div>
                   )}
@@ -1543,11 +2136,16 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
           {/* RESULTS */}
           {screen === "results" && result && (
             <div style={{ animation: "fadeUp 0.3s ease" }}>
+              {/* Sticky passage context bar */}
+              <div style={{ background: `${C.gold}08`, border: `1px solid ${C.gold}20`, borderRadius: 10, padding: "8px 12px", marginBottom: 10 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.goldL }}>📖 {passage}</div>
+                {sermonContext && <div style={{ fontSize: 10, color: C.dim, marginTop: 2 }}>Context: {sermonContext}</div>}
+              </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                 <button onClick={() => setScreen("home")} style={{ flex: 1, padding: 8, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: font }}>↩ New</button>
-                <button onClick={() => setScreen("sources")} style={{ flex: 1, padding: 8, background: `${C.blue}10`, border: `1px solid ${C.blue}25`, borderRadius: 6, color: C.blue, fontSize: 12, cursor: "pointer", fontFamily: font }}>📚 Sources</button>
+                <button onClick={() => { loadBible(); setScreen("bible"); }} style={{ flex: 1, padding: 8, background: `${C.blue}10`, border: `1px solid ${C.blue}25`, borderRadius: 6, color: C.blue, fontSize: 12, cursor: "pointer", fontFamily: font }}>📖 Read</button>
+                <button onClick={() => setScreen("sources")} style={{ flex: 1, padding: 8, background: `${C.purple}10`, border: `1px solid ${C.purple}25`, borderRadius: 6, color: C.purple, fontSize: 12, cursor: "pointer", fontFamily: font }}>📚 Sources</button>
                 {result.points && <button onClick={() => { if(!canAccess("podium")){showToast("Podium mode is a Shepherd feature. Upgrade to unlock.");return;} setPodiumSection(0); setScreen("podium"); }} style={{ flex: 1, padding: 8, background: `${C.gold}10`, border: `1px solid ${C.gold}25`, borderRadius: 6, color: C.gold, fontSize: 12, cursor: "pointer", fontFamily: font }}>📺 Podium</button>}
-                {resultType === "sermon" && <button onClick={shareCurrentSermon} style={{ flex: 1, padding: 8, background: `${C.miracle}10`, border: `1px solid ${C.miracle}25`, borderRadius: 6, color: C.miracle, fontSize: 12, cursor: "pointer", fontFamily: font }}>🕊️</button>}
               </div>
               {/* Translate bar */}
               {lang !== "en" && (
@@ -1558,12 +2156,12 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 <>
                   <div style={{ borderLeft: `3px solid ${C.gold}`, paddingLeft: 12, marginBottom: 14 }}>
                     <h2 style={{ fontSize: 18, fontWeight: 700, color: C.goldL, margin: "0 0 3px" }}>{result.title}</h2>
-                    <p style={{ fontSize: 13, color: "#a1a1aa", margin: 0, fontStyle: "italic" }}>{result.big_idea}</p>
+                    <p style={{ fontSize: 13, color: C.dim, margin: 0, fontStyle: "italic" }}>{result.big_idea}</p>
                   </div>
                   <div style={cardS}>
                     <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 9, color: C.gold, fontFamily: mono, fontWeight: 700 }}>INTRODUCTION</span><AddBtn small label="Intro" content={`Hook: ${result.introduction?.hook}\nContext: ${result.introduction?.context}\nThesis: ${result.introduction?.thesis}`} /></div>
-                    <p style={{ fontSize: 13, color: "#e2e8f0", margin: "6px 0 3px", lineHeight: 1.7 }}>🎣 {result.introduction?.hook}</p>
-                    <p style={{ fontSize: 12, color: "#9ca3af", margin: "3px 0", lineHeight: 1.5 }}>{result.introduction?.context}</p>
+                    <p style={{ fontSize: 13, color: C.text, margin: "6px 0 3px", lineHeight: 1.7 }}>🎣 {result.introduction?.hook}</p>
+                    <p style={{ fontSize: 12, color: C.dim, margin: "3px 0", lineHeight: 1.5 }}>{result.introduction?.context}</p>
                     <p style={{ fontSize: 13, color: C.goldL, margin: "3px 0 0", fontWeight: 500 }}>→ {result.introduction?.thesis}</p>
                   </div>
                   {result.points?.map((pt,i) => (
@@ -1571,22 +2169,22 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
                           <span style={{ width: 22, height: 22, borderRadius: "50%", background: `${C.gold}20`, border: `1.5px solid ${C.gold}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: C.gold, fontFamily: mono, flexShrink: 0 }}>{i+1}</span>
-                          <div><div style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0" }}>{pt.heading}</div><div style={{ fontSize: 10, color: C.blue, fontFamily: mono }}>{pt.verses}</div></div>
+                          <div><div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{pt.heading}</div><div style={{ fontSize: 10, color: C.blue, fontFamily: mono }}>{pt.verses}</div></div>
                         </div>
                         <AddBtn small label={`Pt ${i+1}`} content={`${pt.heading} (${pt.verses})\n${pt.explanation}\n💡 ${pt.illustration}\n✋ ${pt.application}`} />
                       </div>
-                      <p style={{ fontSize: 13, color: "#cbd5e1", margin: "8px 0 4px", lineHeight: 1.7 }}>{pt.explanation}</p>
+                      <p style={{ fontSize: 13, color: C.text, margin: "8px 0 4px", lineHeight: 1.7 }}>{pt.explanation}</p>
                       <p style={{ fontSize: 12, color: C.purple, margin: "0 0 3px" }}>💡 {pt.illustration}</p>
                       <p style={{ fontSize: 12, color: C.green, margin: 0 }}>✋ {pt.application}</p>
                     </div>
                   ))}
                   <div style={cardS}>
                     <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 9, color: C.gold, fontFamily: mono, fontWeight: 700 }}>CONCLUSION</span><AddBtn small label="Conclusion" content={`${result.conclusion?.summary}\n${result.conclusion?.call}`} /></div>
-                    <p style={{ fontSize: 13, color: "#cbd5e1", margin: "6px 0 3px", lineHeight: 1.7 }}>{result.conclusion?.summary}</p>
+                    <p style={{ fontSize: 13, color: C.text, margin: "6px 0 3px", lineHeight: 1.7 }}>{result.conclusion?.summary}</p>
                     <p style={{ fontSize: 13, color: C.goldL, margin: "3px 0", fontWeight: 500 }}>{result.conclusion?.call}</p>
                   </div>
                   {result.cross_refs?.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>{result.cross_refs.map((r,i) => <button key={i} onClick={() => addToDoc("ref", r, `Cross Ref: ${r}`)} style={{ ...tagS(C.blue), cursor: "pointer" }}>{r}</button>)}</div>}
-                  {result.questions?.length > 0 && <div style={cardS}><span style={{ fontSize: 9, color: C.dim, fontFamily: mono, fontWeight: 700 }}>DISCUSSION</span>{result.questions.map((q,i) => <p key={i} style={{ fontSize: 12, color: "#cbd5e1", margin: "5px 0 0" }}>{i+1}. {q}</p>)}</div>}
+                  {result.questions?.length > 0 && <div style={cardS}><span style={{ fontSize: 9, color: C.dim, fontFamily: mono, fontWeight: 700 }}>DISCUSSION</span>{result.questions.map((q,i) => <p key={i} style={{ fontSize: 12, color: C.text, margin: "5px 0 0" }}>{i+1}. {q}</p>)}</div>}
                   <AIDisclaimer type="sermon" />
                 </>
               )}
@@ -1595,11 +2193,11 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 <>
                   <div style={{ borderLeft: `3px solid ${C.blue}`, paddingLeft: 12, marginBottom: 14 }}>
                     <h2 style={{ fontSize: 18, fontWeight: 700, color: "#93b4f5", margin: "0 0 3px" }}>{result.title}</h2>
-                    <p style={{ fontSize: 13, color: "#a1a1aa", margin: 0 }}>{result.definition}</p>
+                    <p style={{ fontSize: 13, color: C.dim, margin: 0 }}>{result.definition}</p>
                   </div>
-                  {result.passages?.map((p,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 10, fontFamily: mono, fontWeight: 700, color: p.testament==="OT"?C.gold:C.blue }}>{p.ref}</span><p style={{ fontSize: 13, color: "#cbd5e1", margin: "4px 0", lineHeight: 1.7 }}>{p.teaching}</p><p style={{ fontSize: 11, color: C.goldL, margin: 0, fontStyle: "italic" }}>💡 {p.insight}</p></div><AddBtn small label={p.ref} content={`${p.ref}: ${p.teaching}`} /></div></div>)}
+                  {result.passages?.map((p,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 10, fontFamily: mono, fontWeight: 700, color: p.testament==="OT"?C.gold:C.blue }}>{p.ref}</span><p style={{ fontSize: 13, color: C.text, margin: "4px 0", lineHeight: 1.7 }}>{p.teaching}</p><p style={{ fontSize: 11, color: C.goldL, margin: 0, fontStyle: "italic" }}>💡 {p.insight}</p></div><AddBtn small label={p.ref} content={`${p.ref}: ${p.teaching}`} /></div></div>)}
                   {result.misconceptions?.map((m,i) => <div key={i} style={cardS}><p style={{ fontSize: 12, color: C.red, margin: "0 0 3px", textDecoration: "line-through", opacity: 0.7 }}>✕ {m.myth}</p><p style={{ fontSize: 12, color: C.green, margin: 0 }}>✓ {m.truth}</p></div>)}
-                  {result.applications?.map((a,i) => <div key={i} style={cardS}><div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{a.situation}</div><p style={{ fontSize: 12, color: "#9ca3af", margin: "3px 0" }}>{a.principle}</p><p style={{ fontSize: 12, color: C.green, margin: 0 }}>→ {a.action}</p></div>)}
+                  {result.applications?.map((a,i) => <div key={i} style={cardS}><div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{a.situation}</div><p style={{ fontSize: 12, color: C.dim, margin: "3px 0" }}>{a.principle}</p><p style={{ fontSize: 12, color: C.green, margin: 0 }}>→ {a.action}</p></div>)}
                   <AIDisclaimer type="topical" />
                 </>
               )}
@@ -1610,12 +2208,28 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
           {screen === "document" && (
             <div style={{ animation: "fadeUp 0.3s ease" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <h2 style={{ fontSize: 16, fontWeight: 600, color: C.goldL, margin: 0 }}>📄 Document</h2>
+                <h2 style={{ fontSize: 16, fontWeight: 600, color: C.goldL, margin: 0 }}>📄 Sermon Notes ({docBlocks.length})</h2>
                 {docBlocks.length > 0 && <button onClick={exportDoc} aria-label="Export document" style={{ background: `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", color: "#fff", padding: "6px 14px", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: mono }}>📋 Export</button>}
               </div>
               <input value={docTitle} onChange={e => setDocTitle(e.target.value)} placeholder={`Study: ${passage}`} aria-label="Document title" style={{ ...inputS, fontSize: 16, fontWeight: 600, color: C.goldL, marginBottom: 10 }} />
               {docBlocks.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "30px 0", color: C.dim }}><p style={{ fontSize: 13, margin: 0 }}>Tap "+ Doc" to start building.</p></div>
+                <div style={{ textAlign: "center", padding: "20px 0", color: C.dim }}>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>📝</div>
+                  <h3 style={{ fontSize: 15, fontWeight: 600, color: C.text, margin: "0 0 12px" }}>Build Your Sermon Here</h3>
+                  {[
+                    { step: "1", icon: "🎤", text: "Generate a sermon on the Prepare tab" },
+                    { step: "2", icon: "➕", text: "Tap '+ Doc' on any section you want to keep" },
+                    { step: "3", icon: "📖", text: "Read Bible text and add key verses" },
+                    { step: "4", icon: "📚", text: "Browse Sources — add commentary and insights" },
+                    { step: "5", icon: "✍️", text: "Write personal notes and reflections" },
+                    { step: "6", icon: "✝", text: "Tap 'AI Compile' to build a preachable sermon" },
+                  ].map(s => (
+                    <div key={s.step} style={{ display: "flex", gap: 10, alignItems: "center", textAlign: "left", marginBottom: 8, padding: "6px 10px", background: C.surface, borderRadius: 8 }}>
+                      <span style={{ fontSize: 14, width: 20, textAlign: "center" }}>{s.icon}</span>
+                      <span style={{ fontSize: 12, color: C.text }}><strong style={{ color: C.gold }}>Step {s.step}:</strong> {s.text}</span>
+                    </div>
+                  ))}
+                </div>
               ) : docBlocks.map((b, idx) => (
                 <div key={b.id} style={{ ...cardS, borderLeft: `3px solid ${b.type==="note"?C.green:b.type==="scripture"?C.blue:C.gold}` }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -1635,7 +2249,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                         <button onClick={() => setEditingId(null)} style={{ flex: 1, padding: 7, background: `${C.red}08`, border: `1px solid ${C.red}25`, borderRadius: 6, color: C.red, fontSize: 11, cursor: "pointer", fontFamily: mono }}>Cancel</button>
                       </div>
                     </>
-                  ) : <p style={{ fontSize: 13, color: "#cbd5e1", margin: 0, lineHeight: 1.7, whiteSpace: "pre-line" }}>{b.content}</p>}
+                  ) : <p style={{ fontSize: 13, color: C.text, margin: 0, lineHeight: 1.7, whiteSpace: "pre-line" }}>{b.content}</p>}
                 </div>
               ))}
               <div style={{ marginTop: 12 }}>
@@ -1643,12 +2257,49 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Notes, reflections..." maxLength={INPUT_LIMITS.sermonBody} aria-label="Add note" style={{ ...inputS, minHeight: 60, fontSize: 13, resize: "vertical" }} />
                 <button onClick={() => { if(noteText.trim()) { addToDoc("note","Note",noteText); setNoteText(""); }}} disabled={!noteText.trim()} style={{ width: "100%", marginTop: 6, padding: 10, background: noteText.trim()?`${C.green}12`:C.card, border: `1px solid ${noteText.trim()?`${C.green}25`:C.border}`, borderRadius: 8, color: noteText.trim()?C.green:C.dim, fontSize: 13, fontWeight: 600, cursor: noteText.trim()?"pointer":"default", fontFamily: font }}>✍️ Add Note</button>
               </div>
-              {docBlocks.length > 0 && (
-                <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-                  <button onClick={exportDoc} style={{ flex: 1, padding: 12, background: `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 8, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: font }}>📋 Copy Doc</button>
-                  <button onClick={() => { if(confirm("Clear all blocks?")) setDocBlocks([]); }} style={{ padding: "12px 14px", background: `${C.red}08`, border: `1px solid ${C.red}25`, borderRadius: 8, color: C.red, fontSize: 12, cursor: "pointer", fontFamily: mono }}>🗑️</button>
+              {docBlocks.length >= 2 && (
+                <div style={{ marginTop: 14 }}>
+                  <button onClick={compileSermon} disabled={isLoading("compile")} style={{ width: "100%", padding: 14, background: isLoading("compile") ? C.card : `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 10, color: isLoading("compile") ? C.dim : "#fff", fontSize: 15, fontWeight: 700, cursor: isLoading("compile") ? "default" : "pointer", fontFamily: font }}>
+                    {isLoading("compile") ? "⏳ AI Compiling Sermon..." : "✝ AI Compile into Full Sermon"}
+                  </button>
+                  <p style={{ fontSize: 10, color: C.dim, textAlign: "center", marginTop: 4 }}>AI reads all your notes and generates a complete, preachable sermon</p>
                 </div>
               )}
+              {compiledSermon && (
+                <div style={{ marginTop: 14, ...cardS, borderLeft: `3px solid ${C.gold}`, background: `${C.gold}05` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: C.gold }}>✝ Compiled Sermon</span>
+                    <button onClick={() => { navigator.clipboard?.writeText(compiledSermon); showToast("📋 Sermon copied!"); }} style={{ background: C.gold, border: "none", color: "#fff", padding: "4px 10px", borderRadius: 4, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Copy</button>
+                  </div>
+                  <p style={{ fontSize: 14, color: C.text, margin: 0, lineHeight: 1.9, whiteSpace: "pre-line" }}>{compiledSermon}</p>
+                </div>
+              )}
+              {docBlocks.length > 0 && (
+                <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+                  <button onClick={exportDoc} style={{ flex: 1, padding: 12, background: `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 8, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: font }}>📋 Copy</button>
+                  <button onClick={() => saveToArchive({})} style={{ flex: 1, padding: 12, background: `${C.blue}10`, border: `1px solid ${C.blue}25`, borderRadius: 8, color: C.blue, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: font }}>📚 Archive</button>
+                  <button onClick={() => { if(confirm("Clear all blocks?")) { setDocBlocks([]); setCompiledSermon(null); } }} style={{ padding: "12px 14px", background: `${C.red}08`, border: `1px solid ${C.red}25`, borderRadius: 8, color: C.red, fontSize: 12, cursor: "pointer", fontFamily: mono }}>🗑️</button>
+                </div>
+              )}
+
+              {/* Sermon Archive viewer */}
+              <div style={{ marginTop: 14 }}>
+                <button onClick={() => setShowArchive(!showArchive)} style={{ width: "100%", padding: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>{showArchive ? "✕ Close Archive" : `📚 Sermon Archive (${sermonArchive.length})`}</button>
+                {showArchive && sermonArchive.length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    {sermonArchive.slice(0, 20).map(s => (
+                      <div key={s.id} style={{ ...cardS, padding: 10, marginBottom: 4, cursor: "pointer" }} onClick={() => { setCompiledSermon(s.content); showToast(`Loaded: ${s.title}`); }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{s.title}</span>
+                          <span style={{ fontSize: 9, color: C.dim }}>{s.date}</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: C.gold }}>{s.passage}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {showArchive && sermonArchive.length === 0 && <p style={{ fontSize: 11, color: C.dim, textAlign: "center", marginTop: 6 }}>No archived sermons yet. Compile a sermon and tap "Archive" to save it.</p>}
+              </div>
             </div>
           )}
 
@@ -1660,12 +2311,39 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                   <div style={{ textAlign: "center", marginBottom: 8 }}>
                     <h2 style={{ fontSize: 17, fontWeight: 700, color: C.goldL, margin: 0 }}>🕊️ Faith Community</h2>
                   </div>
-                  <div style={{ display: "flex", gap: 5, overflowX: "auto", paddingBottom: 6, marginBottom: 10, WebkitOverflowScrolling: "touch" }} role="tablist">
-                    {[{id:"prayer",icon:"🙏",l:"Prayer"},{id:"sermons",icon:"🎤",l:"Sermons"},{id:"songs",icon:"🎵",l:"Songs"},{id:"illustrations",icon:"💡",l:"Illustr."},{id:"kids",icon:"🌟",l:"Kids"},{id:"teens",icon:"🔥",l:"Teens"},{id:"games",icon:"🎮",l:"Games"},{id:"events",icon:"📅",l:"Events"},{id:"charity",icon:"💛",l:"Charity"},{id:"mentorship",icon:"🤝",l:"Mentors"},{id:"family",icon:"👨‍👩‍👧‍👦",l:"Family"}].map(t => (
-                      <button key={t.id} role="tab" aria-selected={hubTab===t.id} onClick={() => setHubTab(t.id)} style={{ padding: "6px 10px", background: hubTab===t.id?`${C.gold}15`:C.card, border: hubTab===t.id?`1px solid ${C.gold}35`:`1px solid ${C.border}`, borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}>
-                        <span style={{ fontSize: 13 }}>{t.icon}</span><span style={{ fontSize: 10, fontWeight: hubTab===t.id?700:400, color: hubTab===t.id?C.goldL:C.dim }}>{t.l}</span>
-                      </button>
-                    ))}
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 10, color: C.gold, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Worship & Study</div>
+                    <div style={{ display: "flex", gap: 5, marginBottom: 8, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                      {[{id:"prayer",icon:"🙏",l:"Prayer"},{id:"sermons",icon:"🎤",l:"Sermons"},{id:"songs",icon:"🎵",l:"Music"},{id:"illustrations",icon:"💡",l:"Illustr."},{id:"media",icon:"🎬",l:"Media & Learn"}].map(t => (
+                        <button key={t.id} role="tab" aria-selected={hubTab===t.id} onClick={() => setHubTab(t.id)} style={{ padding: "6px 12px", background: hubTab===t.id?`${C.gold}15`:C.card, border: hubTab===t.id?`1px solid ${C.gold}35`:`1px solid ${C.border}`, borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}>
+                          <span style={{ fontSize: 13 }}>{t.icon}</span><span style={{ fontSize: 10, fontWeight: hubTab===t.id?700:400, color: hubTab===t.id?C.goldL:C.dim }}>{t.l}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.green, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Next Generation</div>
+                    <div style={{ display: "flex", gap: 5, marginBottom: 8, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                      {[{id:"kids",icon:"🌟",l:"Kids"},{id:"teens",icon:"🔥",l:"Teens"},{id:"mentorship",icon:"🤝",l:"Mentors"},{id:"games",icon:"🎮",l:"Games"},{id:"family",icon:"👨‍👩‍👧‍👦",l:"Family"}].map(t => (
+                        <button key={t.id} role="tab" aria-selected={hubTab===t.id} onClick={() => setHubTab(t.id)} style={{ padding: "6px 12px", background: hubTab===t.id?`${C.green}15`:C.card, border: hubTab===t.id?`1px solid ${C.green}35`:`1px solid ${C.border}`, borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}>
+                          <span style={{ fontSize: 13 }}>{t.icon}</span><span style={{ fontSize: 10, fontWeight: hubTab===t.id?700:400, color: hubTab===t.id?C.green:C.dim }}>{t.l}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.blue, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Church Life</div>
+                    <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                      {[{id:"events",icon:"📅",l:"Events"},{id:"charity",icon:"💛",l:"Charity"}].map(t => (
+                        <button key={t.id} role="tab" aria-selected={hubTab===t.id} onClick={() => setHubTab(t.id)} style={{ padding: "6px 12px", background: hubTab===t.id?`${C.blue}15`:C.card, border: hubTab===t.id?`1px solid ${C.blue}35`:`1px solid ${C.border}`, borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}>
+                          <span style={{ fontSize: 13 }}>{t.icon}</span><span style={{ fontSize: 10, fontWeight: hubTab===t.id?700:400, color: hubTab===t.id?C.blue:C.dim }}>{t.l}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.green, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 }}>Wellness</div>
+                    <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                      {[{id:"wellness",icon:"🌿",l:"Healthy Soul"}].map(t => (
+                        <button key={t.id} role="tab" aria-selected={hubTab===t.id} onClick={() => setHubTab(t.id)} style={{ padding: "6px 12px", background: hubTab===t.id?`${C.green}15`:C.card, border: hubTab===t.id?`1px solid ${C.green}35`:`1px solid ${C.border}`, borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}>
+                          <span style={{ fontSize: 13 }}>{t.icon}</span><span style={{ fontSize: 10, fontWeight: hubTab===t.id?700:400, color: hubTab===t.id?C.green:C.dim }}>{t.l}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {/* PRAYER POWER MAP */}
@@ -1695,7 +2373,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                           return (
                             <div key={i} style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 5px", borderRadius: 5, background: st.glow ? `${st.color}08` : "transparent", border: `1px solid ${st.glow ? `${st.color}18` : "transparent"}` }}>
                               <span style={{ fontSize: 13, width: 18, textAlign: "center" }}>{zone.emoji}</span>
-                              <div style={{ flex: 1, fontSize: 10, fontWeight: 600, color: st.glow ? "#e2e8f0" : C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{zone.name}</div>
+                              <div style={{ flex: 1, fontSize: 10, fontWeight: 600, color: st.glow ? C.text : C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{zone.name}</div>
                               <span style={{ fontSize: 9, fontFamily: mono, color: st.color, minWidth: 36, textAlign: "right" }}>{lh}:{lm.slice(0,2)}</span>
                               <span style={{ fontSize: 7, color: st.color, fontFamily: mono, minWidth: 46, textAlign: "right" }}>{st.label}</span>
                               {st.glow && <div style={{ width: 5, height: 5, borderRadius: "50%", background: st.color, boxShadow: `0 0 6px ${st.color}80`, flexShrink: 0 }}/>}
@@ -1729,7 +2407,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                       {GLOBAL_PRAYER_FOCUSES.map(f => (
                         <button key={f.id} onClick={() => { setPrayerForm(p => ({...p, text: `Praying for ${f.title}: ${f.desc}`, category: "nations"})); setShowPrayerForm(true); }} style={{ ...cardS, cursor: "pointer", padding: 8, textAlign: "left", borderLeft: `3px solid ${f.color}` }}>
                           <div style={{ fontSize: 16, marginBottom: 2 }}>{f.icon}</div>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: "#e2e8f0", lineHeight: 1.2 }}>{f.title}</div>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: C.text, lineHeight: 1.2 }}>{f.title}</div>
                           <div style={{ fontSize: 8, color: C.dim, marginTop: 1 }}>{f.region}</div>
                           <div style={{ fontSize: 7, color: f.color, fontFamily: mono, marginTop: 1 }}>📖 {f.verse}</div>
                         </button>
@@ -1751,7 +2429,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                         <div style={{ flex: 1 }}>
                           {p.urgent && <span style={{ fontSize: 7, color: "#fff", background: C.red, padding: "1px 4px", borderRadius: 3, fontFamily: mono, fontWeight: 700, marginRight: 3 }}>URGENT</span>}
                           <span style={{ fontSize: 9, color: C.dim }}>{p.name} • {p.displayTime}</span>
-                          <p style={{ fontSize: 12, color: "#e2e8f0", margin: "3px 0 0", lineHeight: 1.5 }}>{p.text}</p>
+                          <p style={{ fontSize: 12, color: C.text, margin: "3px 0 0", lineHeight: 1.5 }}>{p.text}</p>
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 5 }}>
                           <span style={{ fontSize: 9, color: C.purple }}>{p.prayedBy || 0} praying</span>
@@ -1761,7 +2439,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                     ))}
 
                     <div style={{ ...cardS, textAlign: "center", marginTop: 6, background: `${C.gold}06`, borderColor: `${C.gold}20`, padding: 12 }}>
-                      <p style={{ fontSize: 13, color: "#e2e8f0", margin: "0 0 3px", fontStyle: "italic", lineHeight: 1.5 }}>"If two of you shall agree on earth as touching any thing that they shall ask, it shall be done for them of my Father which is in heaven."</p>
+                      <p style={{ fontSize: 13, color: C.text, margin: "0 0 3px", fontStyle: "italic", lineHeight: 1.5 }}>"If two of you shall agree on earth as touching any thing that they shall ask, it shall be done for them of my Father which is in heaven."</p>
                       <span style={{ fontSize: 9, color: C.gold, fontFamily: mono }}>— Matthew 18:19 KJV</span>
                     </div>
                   </>}
@@ -1783,23 +2461,259 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
 
                   {/* SONGS */}
                   {hubTab === "songs" && <>
-                    <div style={{ ...cardS, padding: 14, textAlign: "center" }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 700, color: "#c4b5fd", margin: "0 0 8px" }}>🎵 AI Worship Song Writer</h3>
-                      <input value={songRequest} onChange={e => setSongRequest(e.target.value)} placeholder="Theme, scripture, or feeling..." maxLength={INPUT_LIMITS.songReq} style={{ ...inputS, marginBottom: 6, textAlign: "center" }} />
-                      <button onClick={generateSong} disabled={isLoading("song")||!songRequest.trim()} style={{ width: "100%", padding: 10, background: isLoading("song")?C.card:`linear-gradient(135deg, ${C.purple}, #7c3aed)`, border: "none", borderRadius: 8, color: isLoading("song")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("song")?"default":"pointer", fontFamily: font }}>{isLoading("song")?"⏳ Writing...":"🎵 Generate"}</button>
+                    <div style={{ textAlign: "center", marginBottom: 10 }}>
+                      <div style={{ fontSize: 28, marginBottom: 4 }}>🎵</div>
+                      <h3 style={{ fontSize: 17, fontWeight: 700, color: C.purple, margin: "0 0 2px", fontFamily: font }}>Worship & Music</h3>
+                      <p style={{ fontSize: 11, color: C.dim, margin: 0 }}>"Sing unto the LORD a new song" — Psalm 96:1</p>
                     </div>
-                    {songResult && <div style={{ ...cardS, padding: 14 }}><h4 style={{ fontSize: 15, fontWeight: 700, color: C.goldL, margin: "0 0 6px" }}>🎵 {songResult.title}</h4>{songResult.verses?.map((v,i) => <div key={i} style={{ marginBottom: 8, paddingLeft: 10, borderLeft: v.label?.toLowerCase().includes("chorus")?`3px solid ${C.gold}`:`2px solid ${C.border}` }}><div style={{ fontSize: 9, fontFamily: mono, color: v.label?.toLowerCase().includes("chorus")?C.gold:C.dim, fontWeight: 700, marginBottom: 3 }}>{v.label}</div>{v.lines?.map((l,j) => <p key={j} style={{ fontSize: 14, color: "#e2e8f0", margin: "1px 0", lineHeight: 1.6 }}>{l}</p>)}</div>)}<AIDisclaimer type="song" /></div>}
+
+                    {/* Music mode selector */}
+                    <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                      {[
+                        { id: "write", icon: "✍️", label: "Write Song" },
+                        { id: "plan", icon: "📋", label: "Worship Set" },
+                        { id: "discover", icon: "🎧", label: "Discover" },
+                      ].map(m => (
+                        <button key={m.id} onClick={() => setMusicMode(m.id)} style={{ flex: 1, padding: "8px 4px", background: musicMode===m.id ? `${C.purple}12` : C.card, border: `1px solid ${musicMode===m.id ? C.purple : C.border}`, borderRadius: 8, cursor: "pointer", textAlign: "center" }}>
+                          <div style={{ fontSize: 16 }}>{m.icon}</div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: musicMode===m.id ? C.purple : C.dim }}>{m.label}</div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* WRITE SONG MODE */}
+                    {musicMode === "write" && <>
+                      <div style={{ ...cardS, padding: 14, textAlign: "center" }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 700, color: C.purple, margin: "0 0 6px" }}>✍️ AI Worship Song Writer</h4>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 6, justifyContent: "center" }}>
+                          {["Grace","Worship","Surrender","Hope","Victory","Lament","Thanksgiving","Healing","Praise","The Cross"].map(s => (
+                            <button key={s} onClick={() => setSongRequest(s)} style={{ padding: "3px 8px", background: songRequest===s?`${C.purple}15`:C.surface, border: `1px solid ${songRequest===s?C.purple:C.border}`, borderRadius: 12, fontSize: 9, color: songRequest===s?C.purple:C.dim, cursor: "pointer" }}>{s}</button>
+                          ))}
+                        </div>
+                        <input value={songRequest} onChange={e => setSongRequest(e.target.value)} placeholder="Or type your own theme..." maxLength={INPUT_LIMITS.songReq} style={{ ...inputS, marginBottom: 6, textAlign: "center", fontSize: 11 }} />
+                        <button onClick={generateSong} disabled={isLoading("song")||!songRequest.trim()} style={{ width: "100%", padding: 10, background: isLoading("song")?C.card:`linear-gradient(135deg, ${C.purple}, #7c3aed)`, border: "none", borderRadius: 8, color: isLoading("song")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("song")?"default":"pointer", fontFamily: font }}>{isLoading("song")?"⏳ Writing...":"🎵 Generate Song"}</button>
+                      </div>
+                      {songResult && <div style={{ ...cardS, padding: 14 }}><h4 style={{ fontSize: 15, fontWeight: 700, color: C.goldL, margin: "0 0 6px" }}>🎵 {songResult.title}</h4>{songResult.verses?.map((v,i) => <div key={i} style={{ marginBottom: 8, paddingLeft: 10, borderLeft: v.label?.toLowerCase().includes("chorus")?`3px solid ${C.gold}`:`2px solid ${C.border}` }}><div style={{ fontSize: 9, fontFamily: mono, color: v.label?.toLowerCase().includes("chorus")?C.gold:C.dim, fontWeight: 700, marginBottom: 3 }}>{v.label}</div>{v.lines?.map((l,j) => <p key={j} style={{ fontSize: 14, color: C.text, margin: "1px 0", lineHeight: 1.6 }}>{l}</p>)}</div>)}<AddBtn label={songResult.title} content={songResult.verses?.map(v=>v.label+':\n'+v.lines?.join('\n')).join('\n\n')} /><AIDisclaimer type="song" /></div>}
+                    </>}
+
+                    {/* WORSHIP SET PLANNER */}
+                    {musicMode === "plan" && <>
+                      <div style={{ ...cardS, padding: 14 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 700, color: C.purple, margin: "0 0 4px" }}>📋 Worship Set Planner</h4>
+                        <p style={{ fontSize: 11, color: C.dim, margin: "0 0 6px" }}>AI builds a complete worship set matched to your sermon</p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4 }}>
+                          {passage && <button onClick={() => setWorshipPlanQuery(passage)} style={{ padding: "3px 8px", background: `${C.gold}15`, border: `1px solid ${C.gold}`, borderRadius: 12, fontSize: 9, color: C.gold, cursor: "pointer", fontWeight: 700 }}>📖 {passage}</button>}
+                          {["God's faithfulness","Salvation","The Cross","Holy Spirit","Prayer","Unity","Missions","Grace","Hope","Resurrection"].map(s => (
+                            <button key={s} onClick={() => setWorshipPlanQuery(s)} style={{ padding: "3px 8px", background: worshipPlanQuery===s?`${C.purple}15`:C.surface, border: `1px solid ${worshipPlanQuery===s?C.purple:C.border}`, borderRadius: 12, fontSize: 9, color: worshipPlanQuery===s?C.purple:C.dim, cursor: "pointer" }}>{s}</button>
+                          ))}
+                        </div>
+                        <input value={worshipPlanQuery} onChange={e => setWorshipPlanQuery(e.target.value)} placeholder="Or type your sermon topic..." maxLength={300} style={{ ...inputS, marginBottom: 6, fontSize: 11 }} />
+                        <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+                          {["contemporary","traditional","blended","youth","gospel"].map(s => (
+                            <button key={s} onClick={() => setWorshipStyle(s)} style={{ flex: 1, padding: "4px 2px", background: worshipStyle===s ? `${C.purple}12` : C.surface, border: `1px solid ${worshipStyle===s ? C.purple : C.border}`, borderRadius: 6, fontSize: 8, fontWeight: 600, color: worshipStyle===s ? C.purple : C.dim, cursor: "pointer", textTransform: "capitalize" }}>{s}</button>
+                          ))}
+                        </div>
+                        <button onClick={generateWorshipPlan} disabled={isLoading("worshipPlan")||!worshipPlanQuery.trim()} style={{ width: "100%", padding: 10, background: isLoading("worshipPlan")?C.card:`linear-gradient(135deg, ${C.purple}, #7c3aed)`, border: "none", borderRadius: 8, color: isLoading("worshipPlan")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("worshipPlan")?"default":"pointer" }}>{isLoading("worshipPlan")?"⏳ Planning...":"📋 Build Worship Set"}</button>
+                      </div>
+                      {worshipPlan && <div style={{ ...cardS, padding: 14, borderLeft: `3px solid ${C.purple}` }}>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: C.purple, marginBottom: 2 }}>🎵 {worshipPlan.theme}</div>
+                        <div style={{ fontSize: 10, color: C.dim, marginBottom: 8 }}>{worshipPlan.style} • {worshipPlan.duration}</div>
+                        {worshipPlan.set_list?.map((song,i) => (
+                          <div key={i} style={{ background: C.surface, borderRadius: 8, padding: 10, marginBottom: 6, borderLeft: `3px solid ${song.moment==="opening"?C.green:song.moment==="response"?C.gold:song.moment==="communion"?C.red:song.moment==="closing"?C.blue:C.purple}` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <div>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{song.title}</div>
+                                <div style={{ fontSize: 10, color: C.dim }}>{song.artist} • {song.moment}</div>
+                              </div>
+                              <a href={`https://open.spotify.com/search/${encodeURIComponent(song.title + ' ' + song.artist)}`} target="_blank" rel="noopener" style={{ background: "#1DB954", color: "#fff", padding: "4px 8px", borderRadius: 12, fontSize: 9, fontWeight: 700, textDecoration: "none" }}>▶ Spotify</a>
+                            </div>
+                            <p style={{ fontSize: 10, color: C.gold, margin: "4px 0 0", fontStyle: "italic" }}>📖 {song.scripture_connection}</p>
+                            {song.key && <span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>Key: {song.key} • Tempo: {song.tempo}</span>}
+                          </div>
+                        ))}
+                        {worshipPlan.flow_notes && <div style={{ background: `${C.purple}06`, borderRadius: 6, padding: 8, marginTop: 6 }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>FLOW NOTES</span><p style={{ fontSize: 11, color: C.text, margin: "2px 0 0" }}>{worshipPlan.flow_notes}</p></div>}
+                        {worshipPlan.prayer_transitions && <div style={{ marginTop: 6 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>PRAYER TRANSITIONS</span>{worshipPlan.prayer_transitions.map((p,i) => <p key={i} style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>🙏 {p}</p>)}</div>}
+                        <AddBtn label={`Worship Set: ${worshipPlan.theme}`} content={worshipPlan.set_list?.map((s,i)=>`${i+1}. ${s.title} — ${s.artist} (${s.moment}) [${s.scripture_connection}]`).join('\n')} />
+                        <AIDisclaimer type="worship" />
+                      </div>}
+                    </>}
+
+                    {/* DISCOVER MODE — Christian artists + Spotify links */}
+                    {musicMode === "discover" && <>
+                      <div style={{ ...cardS, padding: 14 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 700, color: C.purple, margin: "0 0 4px" }}>🎧 Discover Christian Music</h4>
+                        <p style={{ fontSize: 11, color: C.dim, margin: "0 0 6px" }}>Find artists and songs for your mood, sermon, or season</p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 6 }}>
+                          {["Uplifting","Contemplative","Energetic","Peaceful","Powerful","Intimate","Grief & comfort","Celebration","Acoustic","Youth worship"].map(s => (
+                            <button key={s} onClick={() => setDiscoverQuery(s)} style={{ padding: "3px 8px", background: discoverQuery===s?`${C.purple}15`:C.surface, border: `1px solid ${discoverQuery===s?C.purple:C.border}`, borderRadius: 12, fontSize: 9, color: discoverQuery===s?C.purple:C.dim, cursor: "pointer" }}>{s}</button>
+                          ))}
+                        </div>
+                        <input value={discoverQuery} onChange={e => setDiscoverQuery(e.target.value)} placeholder="Or describe what you want..." maxLength={200} style={{ ...inputS, marginBottom: 6, fontSize: 11 }} />
+                        <button onClick={discoverMusic} disabled={isLoading("discover")||!discoverQuery.trim()} style={{ width: "100%", padding: 10, background: isLoading("discover")?C.card:`linear-gradient(135deg, ${C.purple}, #7c3aed)`, border: "none", borderRadius: 8, color: isLoading("discover")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("discover")?"default":"pointer" }}>{isLoading("discover")?"⏳ Discovering...":"🎧 Find Music"}</button>
+                      </div>
+                      {discoverResult && <div>
+                        {discoverResult.recommendations?.map((rec,i) => (
+                          <div key={i} style={{ ...cardS, display: "flex", gap: 10, alignItems: "center" }}>
+                            <div style={{ fontSize: 28, flexShrink: 0 }}>{rec.emoji || "🎵"}</div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{rec.song}</div>
+                              <div style={{ fontSize: 11, color: C.purple }}>{rec.artist}</div>
+                              <div style={{ fontSize: 10, color: C.dim }}>{rec.genre} • {rec.mood}</div>
+                              <p style={{ fontSize: 10, color: C.gold, margin: "2px 0 0", fontStyle: "italic" }}>📖 {rec.scripture_vibe}</p>
+                            </div>
+                            <a href={`https://open.spotify.com/search/${encodeURIComponent(rec.song + ' ' + rec.artist)}`} target="_blank" rel="noopener" style={{ background: "#1DB954", color: "#fff", padding: "6px 10px", borderRadius: 16, fontSize: 10, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>▶</a>
+                          </div>
+                        ))}
+                        {discoverResult.playlist_idea && <div style={{ ...cardS, background: `${C.purple}06` }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>PLAYLIST IDEA</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>{discoverResult.playlist_idea}</p></div>}
+                        <AIDisclaimer type="music" />
+                      </div>}
+                    </>}
                   </>}
 
                   {/* ILLUSTRATIONS */}
                   {hubTab === "illustrations" && <>
                     <div style={{ ...cardS, padding: 14, background: `${C.gold}06` }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 700, color: C.goldL, margin: "0 0 8px", textAlign: "center" }}>💡 Sermon Illustrations</h3>
-                      <input value={illusSearch} onChange={e => setIllusSearch(e.target.value)} placeholder="Topic or scripture..." maxLength={INPUT_LIMITS.songReq} style={{ ...inputS, marginBottom: 6, textAlign: "center" }} />
+                      <h3 style={{ fontSize: 15, fontWeight: 700, color: C.goldL, margin: "0 0 6px", textAlign: "center" }}>💡 Sermon Illustrations</h3>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4, justifyContent: "center" }}>
+                        {passage && <button onClick={() => setIllusSearch(passage)} style={{ padding: "3px 8px", background: `${C.gold}15`, border: `1px solid ${C.gold}`, borderRadius: 12, fontSize: 9, color: C.gold, cursor: "pointer", fontWeight: 700 }}>📖 {passage}</button>}
+                        {["Faith","Grace","Forgiveness","Patience","Love","Sacrifice","Hope","Perseverance","Prayer","Trust"].map(s => (
+                          <button key={s} onClick={() => setIllusSearch(s)} style={{ padding: "3px 8px", background: illusSearch===s?`${C.gold}15`:C.surface, border: `1px solid ${illusSearch===s?C.gold:C.border}`, borderRadius: 12, fontSize: 9, color: illusSearch===s?C.gold:C.dim, cursor: "pointer" }}>{s}</button>
+                        ))}
+                      </div>
+                      <input value={illusSearch} onChange={e => setIllusSearch(e.target.value)} placeholder="Or type your own topic..." maxLength={INPUT_LIMITS.songReq} style={{ ...inputS, marginBottom: 6, textAlign: "center", fontSize: 11 }} />
                       <button onClick={() => generateIllustrations(illusSearch)} disabled={isLoading("illus")||!illusSearch.trim()} style={{ width: "100%", padding: 10, background: isLoading("illus")?C.card:`linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 8, color: isLoading("illus")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("illus")?"default":"pointer", fontFamily: font }}>{isLoading("illus")?"⏳ Generating...":"💡 Generate 6 Illustrations"}</button>
                     </div>
-                    {illusResult && <div>{illusResult.illustrations?.map((il,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0" }}>{il.title}</span><span style={{ fontSize: 8, color: C.dim, fontFamily: mono, marginLeft: 4 }}>{il.type?.replace("_"," ")}</span><p style={{ fontSize: 12, color: "#cbd5e1", margin: "4px 0", lineHeight: 1.6 }}>{il.content}</p><span style={{ fontSize: 9, color: C.gold }}>📖 {il.scripture_tie}</span></div><AddBtn small label={il.title} content={`${il.title}\n\n${il.content}\n\nScripture: ${il.scripture_tie}`} /></div></div>)}<AIDisclaimer type="illustration" /></div>}
-                    {illustrations.length > 0 && <><div style={secH}>Library ({illustrations.length})</div>{filteredIllustrations.slice(0,15).map((il,i) => <div key={il.id||i} style={{ ...cardS, padding: 10 }}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 12, fontWeight: 600, color: "#e2e8f0" }}>{il.title}</span><p style={{ fontSize: 11, color: "#9ca3af", margin: "2px 0 0", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{il.content}</p></div><AddBtn small label={il.title} content={il.content} /></div></div>)}</>}
+                    {illusResult && <div>{illusResult.illustrations?.map((il,i) => <div key={i} style={cardS}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{il.title}</span><span style={{ fontSize: 8, color: C.dim, fontFamily: mono, marginLeft: 4 }}>{il.type?.replace("_"," ")}</span><p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.6 }}>{il.content}</p><span style={{ fontSize: 9, color: C.gold }}>📖 {il.scripture_tie}</span></div><AddBtn small label={il.title} content={`${il.title}\n\n${il.content}\n\nScripture: ${il.scripture_tie}`} /></div></div>)}<AIDisclaimer type="illustration" /></div>}
+                    {illustrations.length > 0 && <><div style={secH}>Library ({illustrations.length})</div>{filteredIllustrations.slice(0,15).map((il,i) => <div key={il.id||i} style={{ ...cardS, padding: 10 }}><div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><div style={{ flex: 1 }}><span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{il.title}</span><p style={{ fontSize: 11, color: C.dim, margin: "2px 0 0", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{il.content}</p></div><AddBtn small label={il.title} content={il.content} /></div></div>)}</>}
+                  </>}
+
+                  {/* MEDIA & LEARN */}
+                  {hubTab === "media" && <>
+                    <div style={{ textAlign: "center", marginBottom: 10 }}>
+                      <div style={{ fontSize: 28, marginBottom: 4 }}>🎬</div>
+                      <h3 style={{ fontSize: 17, fontWeight: 700, color: C.blue, margin: "0 0 2px", fontFamily: font }}>Media & Learn</h3>
+                      <p style={{ fontSize: 11, color: C.dim, margin: 0 }}>Videos, virtual tours, courses, and sermon visuals</p>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                      {[
+                        { id: "explore", icon: "🎥", label: "Watch & Learn" },
+                        { id: "tour", icon: "🌍", label: "Virtual Tour" },
+                        { id: "course", icon: "🎓", label: "Mini Course" },
+                        { id: "visuals", icon: "📊", label: "Sermon Visuals" },
+                      ].map(m => (
+                        <button key={m.id} onClick={() => { setMediaMode(m.id); setMediaResult(null); setMediaQuery(""); }} style={{ flex: 1, padding: "8px 2px", background: mediaMode===m.id ? `${C.blue}12` : C.card, border: `1px solid ${mediaMode===m.id ? C.blue : C.border}`, borderRadius: 8, cursor: "pointer", textAlign: "center" }}>
+                          <div style={{ fontSize: 16 }}>{m.icon}</div>
+                          <div style={{ fontSize: 8, fontWeight: 600, color: mediaMode===m.id ? C.blue : C.dim }}>{m.label}</div>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div style={{ marginBottom: 10 }}>
+                      {/* Per-mode preset chips */}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4 }}>
+                        {(mediaMode === "explore" ? ["Revelation","Paul's Journeys","Archaeology","Early Church","Dead Sea Scrolls","Creation","Exodus"]
+                        : mediaMode === "tour" ? ["Jerusalem","Bethlehem","Sea of Galilee","Rome","Ephesus","Mount Sinai","Corinth","Nazareth"]
+                        : mediaMode === "course" ? ["Book of Romans","Prayer","Church History","Intro to Greek","Apologetics","Spiritual Gifts","Parables"]
+                        : ["Grace","The Cross","Psalm 23","Resurrection","Forgiveness","Faith","Love","Hope"]
+                        ).map(s => (
+                          <button key={s} onClick={() => setMediaQuery(s)} style={{ padding: "3px 8px", background: mediaQuery===s?`${C.blue}15`:C.surface, border: `1px solid ${mediaQuery===s?C.blue:C.border}`, borderRadius: 12, fontSize: 9, color: mediaQuery===s?C.blue:C.dim, cursor: "pointer" }}>{s}</button>
+                        ))}
+                      </div>
+                      <input value={mediaQuery} onChange={e => setMediaQuery(e.target.value)} placeholder="Or type your own topic..." maxLength={300} style={{ ...inputS, fontSize: 11, marginBottom: 6 }} />
+                      <button onClick={() => generateMedia(mediaMode, mediaQuery)} disabled={isLoading("media")||!mediaQuery.trim()} style={{ width: "100%", padding: 10, background: isLoading("media")?C.card:`linear-gradient(135deg, ${C.blue}, #1e4f7a)`, border: "none", borderRadius: 8, color: isLoading("media")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("media")?"default":"pointer" }}>
+                        {isLoading("media") ? "⏳ Loading..." : mediaMode === "explore" ? "🎥 Find Media" : mediaMode === "tour" ? "🌍 Start Tour" : mediaMode === "course" ? "🎓 Build Course" : "📊 Plan Visuals"}
+                      </button>
+                    </div>
+
+                    {/* EXPLORE results */}
+                    {mediaResult && mediaMode === "explore" && <div>
+                      {mediaResult.documentaries?.length > 0 && <>
+                        <div style={{ fontSize: 10, color: C.blue, fontWeight: 700, fontFamily: mono, marginBottom: 4 }}>🎬 DOCUMENTARIES & FILMS</div>
+                        {mediaResult.documentaries.map((d,i) => (
+                          <div key={i} style={{ ...cardS, display: "flex", gap: 8, alignItems: "center" }}>
+                            <div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{d.title}</div><div style={{ fontSize: 10, color: C.dim }}>{d.creator} • {d.year} • {d.duration}</div><p style={{ fontSize: 11, color: C.text, margin: "2px 0", lineHeight: 1.4 }}>{d.description}</p><span style={{ fontSize: 9, color: C.gold }}>📖 {d.scripture_connection}</span></div>
+                            <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(d.url_hint)}`} target="_blank" rel="noopener" style={{ background: "#FF0000", color: "#fff", padding: "6px 8px", borderRadius: 8, fontSize: 9, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>▶ YT</a>
+                          </div>
+                        ))}
+                      </>}
+                      {mediaResult.youtube_channels?.length > 0 && <>
+                        <div style={{ fontSize: 10, color: C.red, fontWeight: 700, fontFamily: mono, marginTop: 8, marginBottom: 4 }}>📺 YOUTUBE CHANNELS</div>
+                        {mediaResult.youtube_channels.map((ch,i) => (
+                          <div key={i} style={{ ...cardS }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{ch.name}</div>
+                            <div style={{ fontSize: 10, color: C.dim }}>{ch.subscribers} subscribers • {ch.focus}</div>
+                            <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(ch.name + ' ' + ch.best_video)}`} target="_blank" rel="noopener" style={{ fontSize: 11, color: C.blue, textDecoration: "underline" }}>▶ Watch: {ch.best_video}</a>
+                          </div>
+                        ))}
+                      </>}
+                      {mediaResult.podcasts?.length > 0 && <>
+                        <div style={{ fontSize: 10, color: C.purple, fontWeight: 700, fontFamily: mono, marginTop: 8, marginBottom: 4 }}>🎙️ PODCASTS</div>
+                        {mediaResult.podcasts.map((p,i) => (
+                          <div key={i} style={{ ...cardS }}><div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{p.name}</div><div style={{ fontSize: 10, color: C.dim }}>Hosted by {p.host} • {p.platform}</div><p style={{ fontSize: 10, color: C.gold, margin: "2px 0 0" }}>▶ Try: {p.episode_suggestion}</p></div>
+                        ))}
+                      </>}
+                      {mediaResult.learning_path && <div style={{ ...cardS, background: `${C.blue}06` }}><span style={{ fontSize: 9, color: C.blue, fontWeight: 700, fontFamily: mono }}>LEARNING PATH</span><p style={{ fontSize: 12, color: C.text, margin: "4px 0 0", lineHeight: 1.6, whiteSpace: "pre-line" }}>{mediaResult.learning_path}</p></div>}
+                    </div>}
+
+                    {/* VIRTUAL TOUR results */}
+                    {mediaResult && mediaMode === "tour" && <div style={{ ...cardS, borderLeft: `3px solid ${C.green}` }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: C.green, marginBottom: 2 }}>🌍 {mediaResult.location}</div>
+                      <div style={{ fontSize: 10, color: C.dim }}>{mediaResult.modern_name} • {mediaResult.era}</div>
+                      {mediaResult.bible_references?.map((r,i) => <div key={i} style={{ background: `${C.gold}06`, borderRadius: 6, padding: 6, marginTop: 6 }}><span style={{ fontSize: 10, color: C.gold, fontWeight: 700 }}>{r.ref}</span><span style={{ fontSize: 11, color: C.text, marginLeft: 6 }}>{r.event}</span></div>)}
+                      <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginTop: 10, marginBottom: 4 }}>TOUR STOPS</div>
+                      {mediaResult.tour_stops?.map((s,i) => (
+                        <div key={i} style={{ background: C.surface, borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>📍 {s.stop}</div>
+                          <p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.6 }}>{s.description}</p>
+                          <p style={{ fontSize: 10, color: C.blue, margin: "2px 0" }}>🏛️ {s.historical_note}</p>
+                          <p style={{ fontSize: 10, color: C.gold, margin: "2px 0", fontStyle: "italic" }}>📖 {s.scripture}</p>
+                        </div>
+                      ))}
+                      {mediaResult.google_earth_search && <a href={`https://earth.google.com/web/search/${encodeURIComponent(mediaResult.google_earth_search)}`} target="_blank" rel="noopener" style={{ display: "block", padding: 10, background: `${C.green}10`, border: `1px solid ${C.green}25`, borderRadius: 8, color: C.green, fontSize: 12, fontWeight: 600, textDecoration: "none", textAlign: "center", marginTop: 8 }}>🌐 Open in Google Earth</a>}
+                      {mediaResult.prayer && <div style={{ background: `${C.purple}06`, borderRadius: 6, padding: 8, marginTop: 8 }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>PRAYER AT THIS PLACE</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{mediaResult.prayer}</p></div>}
+                      <AddBtn label={`Virtual Tour: ${mediaResult.location}`} content={`Tour of ${mediaResult.location}\n\n${mediaResult.tour_stops?.map((s,i)=>`Stop ${i+1}: ${s.stop}\n${s.description}\n${s.scripture}`).join('\n\n')}`} />
+                    </div>}
+
+                    {/* MINI COURSE results */}
+                    {mediaResult && mediaMode === "course" && <div style={{ ...cardS, borderLeft: `3px solid ${C.purple}` }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: C.purple, marginBottom: 2 }}>🎓 {mediaResult.course_title}</div>
+                      <div style={{ fontSize: 10, color: C.dim }}>{mediaResult.level} • {mediaResult.duration}</div>
+                      <p style={{ fontSize: 12, color: C.text, margin: "6px 0 10px", lineHeight: 1.5 }}>{mediaResult.description}</p>
+                      {mediaResult.lessons?.map((lesson,i) => (
+                        <div key={i} style={{ background: C.surface, borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                            <div style={{ width: 28, height: 28, borderRadius: 14, background: C.purple, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{lesson.lesson_number}</div>
+                            <div><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{lesson.title}</div><div style={{ fontSize: 9, color: C.dim }}>📖 {lesson.key_passage}</div></div>
+                          </div>
+                          <p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.6, whiteSpace: "pre-line" }}>{lesson.content}</p>
+                          <div style={{ marginTop: 4 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>DISCUSS</span>{lesson.discussion_questions?.map((q,j) => <p key={j} style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>💬 {q}</p>)}</div>
+                          <p style={{ fontSize: 10, color: C.green, marginTop: 4 }}>✅ Do: {lesson.practical_application}</p>
+                          {lesson.video_suggestion && <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(lesson.video_suggestion)}`} target="_blank" rel="noopener" style={{ fontSize: 10, color: C.blue, textDecoration: "underline" }}>▶ Watch: {lesson.video_suggestion}</a>}
+                        </div>
+                      ))}
+                      {mediaResult.final_project && <div style={{ background: `${C.gold}06`, borderRadius: 8, padding: 10, marginTop: 6 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>FINAL PROJECT</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>{mediaResult.final_project}</p></div>}
+                      <AddBtn label={`Course: ${mediaResult.course_title}`} content={`${mediaResult.course_title}\n\n${mediaResult.lessons?.map(l=>`Lesson ${l.lesson_number}: ${l.title}\n${l.content}`).join('\n\n')}`} />
+                    </div>}
+
+                    {/* SERMON VISUALS results */}
+                    {mediaResult && mediaMode === "visuals" && <div style={{ ...cardS, borderLeft: `3px solid ${C.gold}` }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: C.gold, marginBottom: 2 }}>📊 Sermon Visual Plan</div>
+                      {mediaResult.title_slide && <div style={{ background: C.surface, borderRadius: 8, padding: 10, marginBottom: 6 }}><div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{mediaResult.title_slide.title}</div><div style={{ fontSize: 11, color: C.dim }}>{mediaResult.title_slide.subtitle}</div><p style={{ fontSize: 10, color: C.blue, margin: "2px 0" }}>🎨 {mediaResult.title_slide.visual}</p></div>}
+                      {mediaResult.slides?.map((s,i) => (
+                        <div key={i} style={{ background: C.surface, borderRadius: 8, padding: 8, marginBottom: 4, borderLeft: `2px solid ${C.gold}` }}>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>Slide {s.slide_number}: {s.heading}</span></div>
+                          <p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>{s.content}</p>
+                          <p style={{ fontSize: 9, color: C.blue }}>🎨 {s.visual_note}</p>
+                        </div>
+                      ))}
+                      {mediaResult.video_moments?.map((v,i) => <div key={i} style={{ background: `${C.red}06`, borderRadius: 6, padding: 6, marginTop: 4 }}><span style={{ fontSize: 9, color: C.red, fontWeight: 700, fontFamily: mono }}>🎬 VIDEO: {v.moment}</span><p style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>{v.suggestion}</p><a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(v.youtube_search)}`} target="_blank" rel="noopener" style={{ fontSize: 9, color: C.blue }}>▶ Find on YouTube</a></div>)}
+                      {mediaResult.presentation_tips && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginTop: 8 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>TIPS</span><p style={{ fontSize: 11, color: C.text, margin: "2px 0 0" }}>{mediaResult.presentation_tips}</p></div>}
+                      <AddBtn label="Sermon Visual Plan" content={mediaResult.slides?.map(s=>`Slide ${s.slide_number}: ${s.heading}\n${s.content}\nVisual: ${s.visual_note}`).join('\n\n')} />
+                    </div>}
+
+                    {isLoading("media") && <div style={{ textAlign: "center", padding: "30px 0" }}><div style={{ fontSize: 32, marginBottom: 8, animation: "float 1.5s ease infinite" }}>🎬</div><p style={{ color: C.dim, fontSize: 13 }}>Discovering content...</p></div>}
+                    <AIDisclaimer type="media" />
                   </>}
 
                   {/* KIDS & TEENS CORNER */}
@@ -2068,29 +2982,293 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
 
                   {/* GAMES */}
                   {hubTab === "games" && <>
-                    {!gameState.active ? <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>{GAME_CATS.map(g => <button key={g.id} onClick={() => startQuiz(g.id)} style={{ ...cardS, cursor: "pointer", textAlign: "center", padding: 12 }}><div style={{ fontSize: 22, marginBottom: 3 }}>{g.icon}</div><div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{g.name}</div></button>)}</div>
-                    : gameState.qIdx < (gameState.quizData?.questions?.length||0) ? <div style={cardS}><div style={{ width: "100%", height: 3, background: C.border, borderRadius: 2, marginBottom: 10 }}><div style={{ width: `${(gameState.qIdx/gameState.quizData.questions.length)*100}%`, height: "100%", background: C.gold, borderRadius: 2 }}/></div><p style={{ fontSize: 15, color: "#e2e8f0", margin: "0 0 10px", fontWeight: 500 }}>{gameState.quizData.questions[gameState.qIdx].q}</p>{gameState.quizData.questions[gameState.qIdx].options.map((o,i) => <button key={i} onClick={() => answerQuiz(i)} style={{ width: "100%", padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: "#e2e8f0", fontSize: 13, cursor: "pointer", textAlign: "left", fontFamily: font, marginBottom: 4 }}><span style={{ color: C.gold, fontFamily: mono, fontWeight: 700, marginRight: 6 }}>{String.fromCharCode(65+i)}</span>{o}</button>)}</div>
-                    : <div style={{ textAlign: "center" }}><div style={{ fontSize: 40, marginBottom: 6 }}>{gameState.score>=6?"🏆":gameState.score>=4?"⭐":"📖"}</div><div style={{ fontSize: 28, fontWeight: 700, color: C.gold, fontFamily: mono }}>{gameState.score}/{gameState.quizData.questions.length}</div><button onClick={() => setGameState({active:null,score:0,qIdx:0,answers:[],quizData:null})} style={{ marginTop: 10, padding: 10, background: `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 8, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: font, width: "100%" }}>🎮 Play Again</button></div>}
-                    {isLoading("quiz") && <p style={{ textAlign: "center", color: C.dim }}>⏳ Generating quiz...</p>}
+                    {/* Section header */}
+                    <div style={{ textAlign: "center", marginBottom: 10 }}>
+                      <div style={{ fontSize: 28, marginBottom: 4 }}>🏃‍♂️</div>
+                      <h3 style={{ fontSize: 17, fontWeight: 700, color: C.goldL, margin: "0 0 2px", fontFamily: font }}>Healthy Body, Healthy Mind</h3>
+                      <p style={{ fontSize: 13, color: C.gold, margin: 0, fontStyle: "italic" }}>= Healthy Soul</p>
+                      <p style={{ fontSize: 10, color: C.dim, margin: "4px 0 0" }}>Games, quizzes, and team challenges that strengthen faith</p>
+                    </div>
+
+                    {/* Game mode selector */}
+                    <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                      {[
+                        { id: "quiz", icon: "🧠", label: "Bible Quiz" },
+                        { id: "generator", icon: "🎯", label: "Game Generator" },
+                      ].map(m => (
+                        <button key={m.id} onClick={() => { setGameMode(m.id); setGeneratedGame(null); }} style={{ flex: 1, padding: "8px 4px", background: gameMode===m.id ? `${C.gold}12` : C.card, border: `1px solid ${gameMode===m.id ? C.gold : C.border}`, borderRadius: 8, cursor: "pointer", textAlign: "center" }}>
+                          <div style={{ fontSize: 18 }}>{m.icon}</div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: gameMode===m.id ? C.goldL : C.dim }}>{m.label}</div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* BIBLE QUIZ MODE */}
+                    {gameMode === "quiz" && <>
+                      {!gameState.active ? <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>{GAME_CATS.map(g => <button key={g.id} onClick={() => startQuiz(g.id)} style={{ ...cardS, cursor: "pointer", textAlign: "center", padding: 12 }}><div style={{ fontSize: 22, marginBottom: 3 }}>{g.icon}</div><div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{g.name}</div></button>)}</div>
+                      : gameState.qIdx < (gameState.quizData?.questions?.length||0) ? <div style={cardS}><div style={{ width: "100%", height: 3, background: C.border, borderRadius: 2, marginBottom: 10 }}><div style={{ width: `${(gameState.qIdx/gameState.quizData.questions.length)*100}%`, height: "100%", background: C.gold, borderRadius: 2 }}/></div><p style={{ fontSize: 15, color: C.text, margin: "0 0 10px", fontWeight: 500 }}>{gameState.quizData.questions[gameState.qIdx].q}</p>{gameState.quizData.questions[gameState.qIdx].options.map((o,i) => <button key={i} onClick={() => answerQuiz(i)} style={{ width: "100%", padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, cursor: "pointer", textAlign: "left", fontFamily: font, marginBottom: 4 }}><span style={{ color: C.gold, fontFamily: mono, fontWeight: 700, marginRight: 6 }}>{String.fromCharCode(65+i)}</span>{o}</button>)}</div>
+                      : <div style={{ textAlign: "center" }}><div style={{ fontSize: 40, marginBottom: 6 }}>{gameState.score>=6?"🏆":gameState.score>=4?"⭐":"📖"}</div><div style={{ fontSize: 28, fontWeight: 700, color: C.gold, fontFamily: mono }}>{gameState.score}/{gameState.quizData.questions.length}</div><button onClick={() => setGameState({active:null,score:0,qIdx:0,answers:[],quizData:null})} style={{ marginTop: 10, padding: 10, background: `linear-gradient(135deg, ${C.gold}, #a0832e)`, border: "none", borderRadius: 8, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: font, width: "100%" }}>🎮 Play Again</button></div>}
+                      {isLoading("quiz") && <p style={{ textAlign: "center", color: C.dim }}>⏳ Generating quiz...</p>}
+                    </>}
+
+                    {/* GAME GENERATOR MODE */}
+                    {gameMode === "generator" && <>
+                      <div style={cardS}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: C.goldL, marginBottom: 8 }}>🎯 Custom Game Generator</div>
+
+                        <div style={{ fontSize: 10, color: C.dim, fontWeight: 600, marginBottom: 4 }}>Age Group</div>
+                        <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+                          {[{id:"kids",l:"Kids (4-12)",icon:"🌟"},{id:"teens",l:"Teens (13-18)",icon:"🔥"},{id:"adults",l:"Adults (18+)",icon:"👤"},{id:"mixed",l:"All Ages",icon:"👨‍👩‍👧‍👦"}].map(a => (
+                            <button key={a.id} onClick={() => setGameConfig(g=>({...g,ageGroup:a.id}))} style={{ flex: 1, padding: "6px 2px", background: gameConfig.ageGroup===a.id?`${C.gold}12`:C.surface, border: `1px solid ${gameConfig.ageGroup===a.id?C.gold:C.border}`, borderRadius: 6, cursor: "pointer", textAlign: "center" }}>
+                              <div style={{ fontSize: 14 }}>{a.icon}</div>
+                              <div style={{ fontSize: 8, color: gameConfig.ageGroup===a.id?C.goldL:C.dim, fontWeight: 600 }}>{a.l}</div>
+                            </button>
+                          ))}
+                        </div>
+
+                        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 10, color: C.dim, fontWeight: 600, marginBottom: 4 }}>Group Size</div>
+                            <select value={gameConfig.groupSize} onChange={e => setGameConfig(g=>({...g,groupSize:e.target.value}))} style={{ ...inputS, width: "100%", fontSize: 11, padding: "6px 8px" }}>
+                              <option value="2-5">2-5 people</option>
+                              <option value="5-10">5-10 people</option>
+                              <option value="10-20">10-20 people</option>
+                              <option value="20-50">20-50 people</option>
+                              <option value="50+">50+ people</option>
+                            </select>
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 10, color: C.dim, fontWeight: 600, marginBottom: 4 }}>Space</div>
+                            <select value={gameConfig.space} onChange={e => setGameConfig(g=>({...g,space:e.target.value}))} style={{ ...inputS, width: "100%", fontSize: 11, padding: "6px 8px" }}>
+                              <option value="indoor">Indoor (small room)</option>
+                              <option value="indoor-large">Indoor (hall/gym)</option>
+                              <option value="outdoor">Outdoor (field)</option>
+                              <option value="anywhere">Anywhere</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div style={{ fontSize: 10, color: C.dim, fontWeight: 600, marginBottom: 4 }}>Sermon Topic (optional)</div>
+                        <input value={gameConfig.topic} onChange={e => setGameConfig(g=>({...g,topic:e.target.value}))} placeholder="e.g. faith, teamwork, trust in God, Romans 8:28..." maxLength={200} style={{ ...inputS, fontSize: 11, marginBottom: 10 }} />
+
+                        <div style={{ fontSize: 10, color: C.dim, fontWeight: 600, marginBottom: 6 }}>Generate a...</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                          {[
+                            { type: "team building", icon: "🤝", label: "Team Builder", desc: "Collaboration & trust" },
+                            { type: "icebreaker", icon: "🧊", label: "Icebreaker", desc: "Quick 5-min opener" },
+                            { type: "youth group game", icon: "🎮", label: "Youth Group", desc: "Active & energetic" },
+                            { type: "relay race", icon: "🏃", label: "Relay Race", desc: "Competitive teams" },
+                            { type: "scavenger hunt", icon: "🔍", label: "Scavenger Hunt", desc: "Explore & discover" },
+                            { type: "minute-to-win-it challenge", icon: "⏱️", label: "Minute to Win It", desc: "Quick challenges" },
+                            { type: "escape room puzzle", icon: "🔐", label: "Escape Room", desc: "Solve puzzles together" },
+                            { type: "worship game", icon: "🎵", label: "Worship Game", desc: "Music & praise" },
+                          ].map(g => (
+                            <button key={g.type} onClick={() => generateGame(g.type)} disabled={isLoading("gameGen")} style={{ ...cardS, cursor: isLoading("gameGen") ? "default" : "pointer", textAlign: "center", padding: 10 }}>
+                              <div style={{ fontSize: 20, marginBottom: 2 }}>{g.icon}</div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{g.label}</div>
+                              <div style={{ fontSize: 8, color: C.dim }}>{g.desc}</div>
+                            </button>
+                          ))}
+                        </div>
+                        {isLoading("gameGen") && <p style={{ textAlign: "center", color: C.dim, marginTop: 8 }}>⏳ Creating your game...</p>}
+                      </div>
+
+                      {/* Generated game display */}
+                      {generatedGame && (
+                        <div style={{ ...cardS, marginTop: 10, borderLeft: `3px solid ${C.gold}` }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                            <div>
+                              <div style={{ fontSize: 16, fontWeight: 700, color: C.goldL }}>{generatedGame.emoji} {generatedGame.name}</div>
+                              <div style={{ fontSize: 10, color: C.dim }}>{generatedGame.type} • {generatedGame.duration} • {generatedGame.energy_level} energy</div>
+                            </div>
+                            <button onClick={() => { navigator.clipboard?.writeText(JSON.stringify(generatedGame, null, 2)); showToast("📋 Game copied!"); }} style={{ background: C.gold, border: "none", color: "#fff", padding: "4px 10px", borderRadius: 4, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Copy</button>
+                          </div>
+
+                          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+                            <span style={{ ...tagS(C.blue), fontSize: 9 }}>👥 {generatedGame.group_size}</span>
+                            <span style={{ ...tagS(C.green), fontSize: 9 }}>📍 {generatedGame.space}</span>
+                            <span style={{ ...tagS(C.purple), fontSize: 9 }}>🎂 {generatedGame.age_group}</span>
+                          </div>
+
+                          {generatedGame.scripture_tie && (
+                            <div style={{ background: `${C.gold}08`, borderRadius: 8, padding: 8, marginBottom: 8 }}>
+                              <span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>SCRIPTURE CONNECTION</span>
+                              <p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{generatedGame.scripture_tie}</p>
+                            </div>
+                          )}
+
+                          <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginBottom: 4 }}>MATERIALS</div>
+                          <p style={{ fontSize: 12, color: C.text, margin: "0 0 8px" }}>{(generatedGame.materials || []).join(", ") || "None needed"}</p>
+
+                          <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginBottom: 4 }}>SETUP</div>
+                          <p style={{ fontSize: 12, color: C.text, margin: "0 0 8px", lineHeight: 1.5 }}>{generatedGame.setup}</p>
+
+                          <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginBottom: 4 }}>RULES</div>
+                          {(generatedGame.rules || []).map((r, i) => (
+                            <div key={i} style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "flex-start" }}>
+                              <span style={{ fontSize: 10, color: C.gold, fontWeight: 700, fontFamily: mono, minWidth: 16 }}>{i+1}.</span>
+                              <span style={{ fontSize: 12, color: C.text, lineHeight: 1.5 }}>{r}</span>
+                            </div>
+                          ))}
+
+                          {generatedGame.variations?.length > 0 && <>
+                            <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginTop: 8, marginBottom: 4 }}>VARIATIONS</div>
+                            {generatedGame.variations.map((v, i) => <p key={i} style={{ fontSize: 11, color: C.dim, margin: "0 0 3px" }}>• {v}</p>)}
+                          </>}
+
+                          <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginTop: 8, marginBottom: 4 }}>DEBRIEF QUESTIONS</div>
+                          {(generatedGame.debrief || []).map((q, i) => <p key={i} style={{ fontSize: 12, color: C.text, margin: "0 0 4px" }}>💬 {q}</p>)}
+
+                          {generatedGame.leader_tip && (
+                            <div style={{ background: `${C.green}08`, borderRadius: 8, padding: 8, marginTop: 8 }}>
+                              <span style={{ fontSize: 9, color: C.green, fontWeight: 700, fontFamily: mono }}>💡 LEADER TIP</span>
+                              <p style={{ fontSize: 11, color: C.text, margin: "2px 0 0" }}>{generatedGame.leader_tip}</p>
+                            </div>
+                          )}
+
+                          <button onClick={() => generateGame(generatedGame.type)} disabled={isLoading("gameGen")} style={{ width: "100%", marginTop: 10, padding: 10, background: `${C.gold}10`, border: `1px solid ${C.gold}25`, borderRadius: 8, color: C.gold, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>🎲 Generate Another {generatedGame.type}</button>
+                          <AIDisclaimer type="games" />
+                        </div>
+                      )}
+                    </>}
                   </>}
 
                   {/* EVENTS */}
                   {hubTab === "events" && <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}><h3 style={{ fontSize: 14, fontWeight: 600, color: C.goldL, margin: 0 }}>📅 Events</h3><button onClick={() => setShowEventForm(!showEventForm)} style={{ background: `${C.gold}12`, border: `1px solid ${C.gold}25`, color: C.gold, padding: "4px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer", fontFamily: mono }}>{showEventForm?"✕":"+ Post"}</button></div>
                     {showEventForm && <div style={{ ...cardS, padding: 12, marginBottom: 8 }}><input value={eventForm.title} onChange={e => setEventForm(f=>({...f,title:e.target.value}))} placeholder="Event name" maxLength={200} style={{ ...inputS, marginBottom: 5, fontSize: 13 }} /><div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 5 }}>{EVENT_TYPES.map(t => <button key={t.id} onClick={() => setEventForm(f=>({...f,type:t.id}))} style={{ background: eventForm.type===t.id?`${t.color}18`:C.surface, border: `1px solid ${eventForm.type===t.id?`${t.color}35`:C.border}`, color: eventForm.type===t.id?t.color:C.dim, borderRadius: 12, padding: "3px 8px", fontSize: 9, cursor: "pointer" }}>{t.label}</button>)}</div><button onClick={postEvent} disabled={!eventForm.title||!eventForm.type} style={{ width: "100%", padding: 8, background: eventForm.title&&eventForm.type?`linear-gradient(135deg, ${C.gold}, #a0832e)`:C.card, border: "none", borderRadius: 6, color: eventForm.title&&eventForm.type?"#fff":C.dim, fontSize: 12, fontWeight: 700, cursor: eventForm.title&&eventForm.type?"pointer":"default" }}>📅 Post</button></div>}
-                    {events.length===0 ? <p style={{ textAlign: "center", color: C.dim, fontSize: 12 }}>No events yet.</p> : events.map(ev => {const et=EVENT_TYPES.find(t=>t.id===ev.type);return <div key={ev.id} style={{ ...cardS, borderLeft: `3px solid ${et?.color||C.gold}` }}><div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0" }}>{ev.title}</div><div style={{ fontSize: 10, color: et?.color||C.dim }}>{et?.label||ev.type} • {ev.date}</div>{ev.desc && <p style={{ fontSize: 11, color: "#9ca3af", margin: "4px 0" }}>{ev.desc}</p>}<div style={{ display: "flex", gap: 4 }}>{[{t:"going",i:"✋"},{t:"interested",i:"⭐"},{t:"praying",i:"🙏"}].map(r => <button key={r.t} onClick={() => reactEvent(ev.id,r.t)} style={{ flex: 1, padding: "3px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", textAlign: "center", fontSize: 10, color: C.dim }}>{r.i} {ev.reactions?.[r.t]||0}</button>)}</div></div>})}
+                    {events.length===0 ? <p style={{ textAlign: "center", color: C.dim, fontSize: 12 }}>No events yet.</p> : events.map(ev => {const et=EVENT_TYPES.find(t=>t.id===ev.type);return <div key={ev.id} style={{ ...cardS, borderLeft: `3px solid ${et?.color||C.gold}` }}><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{ev.title}</div><div style={{ fontSize: 10, color: et?.color||C.dim }}>{et?.label||ev.type} • {ev.date}</div>{ev.desc && <p style={{ fontSize: 11, color: C.dim, margin: "4px 0" }}>{ev.desc}</p>}<div style={{ display: "flex", gap: 4 }}>{[{t:"going",i:"✋"},{t:"interested",i:"⭐"},{t:"praying",i:"🙏"}].map(r => <button key={r.t} onClick={() => reactEvent(ev.id,r.t)} style={{ flex: 1, padding: "3px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", textAlign: "center", fontSize: 10, color: C.dim }}>{r.i} {ev.reactions?.[r.t]||0}</button>)}</div></div>})}
                   </>}
 
                   {/* CHARITY */}
-                  {hubTab === "charity" && CHARITY_CAUSES.map(c => {const pct=Math.round((Math.random()*c.goal*0.7)/c.goal*100);return <div key={c.id} style={cardS}><div style={{ display: "flex", gap: 8 }}><div style={{ fontSize: 24, flexShrink: 0 }}>{c.icon}</div><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0" }}>{c.name}</div><p style={{ fontSize: 11, color: "#9ca3af", margin: "2px 0 6px" }}>{c.desc}</p><div style={{ width: "100%", height: 6, background: C.border, borderRadius: 3 }}><div style={{ width: `${pct}%`, height: "100%", background: c.color, borderRadius: 3 }}/></div><div style={{ fontSize: 9, color: C.dim, fontFamily: mono, marginTop: 2 }}>{pct}% of ${c.goal} goal</div></div></div></div>})}
+                  {hubTab === "charity" && CHARITY_CAUSES.map(c => {const pct=Math.round((Math.random()*c.goal*0.7)/c.goal*100);return <div key={c.id} style={cardS}><div style={{ display: "flex", gap: 8 }}><div style={{ fontSize: 24, flexShrink: 0 }}>{c.icon}</div><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{c.name}</div><p style={{ fontSize: 11, color: C.dim, margin: "2px 0 6px" }}>{c.desc}</p><div style={{ width: "100%", height: 6, background: C.border, borderRadius: 3 }}><div style={{ width: `${pct}%`, height: "100%", background: c.color, borderRadius: 3 }}/></div><div style={{ fontSize: 9, color: C.dim, fontFamily: mono, marginTop: 2 }}>{pct}% of ${c.goal} goal</div></div></div></div>})}
 
                   {/* MENTORSHIP */}
-                  {hubTab === "mentorship" && MENTOR_ROLES.map(r => <div key={r.id} style={{ ...cardS, display: "flex", gap: 8, alignItems: "center" }}><div style={{ fontSize: 24 }}>{r.icon}</div><div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{r.title}</div></div>)}
+                  {hubTab === "mentorship" && MENTOR_ROLES.map(r => <div key={r.id} style={{ ...cardS, display: "flex", gap: 8, alignItems: "center" }}><div style={{ fontSize: 24 }}>{r.icon}</div><div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{r.title}</div></div>)}
 
                   {/* FAMILY */}
                   {hubTab === "family" && <>
                     <button onClick={generateFamily} disabled={isLoading("family")} style={{ width: "100%", padding: 12, background: isLoading("family")?C.card:`linear-gradient(135deg, ${C.blue}, #3366cc)`, border: "none", borderRadius: 8, color: isLoading("family")?C.dim:"#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("family")?"default":"pointer", fontFamily: font, marginBottom: 10 }}>{isLoading("family")?"⏳ Generating...":"🎲 Generate Family Activity Pack"}</button>
-                    {familyActivities && <div>{familyActivities.memory_verse && <div style={{ ...cardS, textAlign: "center", background: `${C.gold}06` }}><div style={{ fontSize: 14, fontWeight: 700, color: C.goldL }}>{familyActivities.theme}</div><p style={{ fontSize: 12, color: "#e2e8f0", margin: "4px 0 0", fontStyle: "italic" }}>"{familyActivities.memory_verse.text}" — {familyActivities.memory_verse.ref}</p></div>}{familyActivities.activities?.map((a,i) => {const icons={game:"🎮",craft:"✂️",devotion:"📖",service:"🤝",cooking:"🍳",outdoor:"🌳"};return <div key={i} style={cardS}><div style={{ display: "flex", gap: 6 }}><div style={{ fontSize: 20 }}>{icons[a.type]||"⭐"}</div><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0" }}>{a.title}</div><div style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{a.type} • {a.ages} • {a.duration}</div><p style={{ fontSize: 12, color: "#cbd5e1", margin: "4px 0", lineHeight: 1.5 }}>{a.description}</p><p style={{ fontSize: 10, color: C.gold, margin: 0, fontStyle: "italic" }}>✝ {a.faith_connection}</p></div></div></div>})}<AIDisclaimer type="family" /></div>}
+                    {familyActivities && <div>{familyActivities.memory_verse && <div style={{ ...cardS, textAlign: "center", background: `${C.gold}06` }}><div style={{ fontSize: 14, fontWeight: 700, color: C.goldL }}>{familyActivities.theme}</div><p style={{ fontSize: 12, color: C.text, margin: "4px 0 0", fontStyle: "italic" }}>"{familyActivities.memory_verse.text}" — {familyActivities.memory_verse.ref}</p></div>}{familyActivities.activities?.map((a,i) => {const icons={game:"🎮",craft:"✂️",devotion:"📖",service:"🤝",cooking:"🍳",outdoor:"🌳"};return <div key={i} style={cardS}><div style={{ display: "flex", gap: 6 }}><div style={{ fontSize: 20 }}>{icons[a.type]||"⭐"}</div><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{a.title}</div><div style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{a.type} • {a.ages} • {a.duration}</div><p style={{ fontSize: 12, color: C.text, margin: "4px 0", lineHeight: 1.5 }}>{a.description}</p><p style={{ fontSize: 10, color: C.gold, margin: 0, fontStyle: "italic" }}>✝ {a.faith_connection}</p></div></div></div>})}<AIDisclaimer type="family" /></div>}
+                  </>}
+
+                  {/* HEALTHY SOUL — Biblical Health & Nutrition */}
+                  {hubTab === "wellness" && <>
+                    <div style={{ textAlign: "center", marginBottom: 10 }}>
+                      <div style={{ fontSize: 28, marginBottom: 4 }}>🌿</div>
+                      <h3 style={{ fontSize: 17, fontWeight: 700, color: C.green, margin: "0 0 2px", fontFamily: font }}>Healthy Soul</h3>
+                      <p style={{ fontSize: 12, color: C.dim, margin: 0, fontStyle: "italic" }}>Healthy Body, Healthy Mind = Healthy Soul</p>
+                      <p style={{ fontSize: 10, color: C.dim, margin: "2px 0 0" }}>"Do you not know that your body is a temple?" — 1 Cor 6:19</p>
+                    </div>
+
+                    {/* Mode selector */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
+                      {WELLNESS_MODES.map(m => (
+                        <button key={m.id} onClick={() => { setWellnessMode(m.id); setWellnessResult(null); setWellnessQuery(""); }} style={{ padding: "10px 4px", background: wellnessMode===m.id ? `${m.color}12` : C.card, border: `1px solid ${wellnessMode===m.id ? m.color : C.border}`, borderRadius: 10, cursor: "pointer", textAlign: "center" }}>
+                          <div style={{ fontSize: 20, marginBottom: 2 }}>{m.icon}</div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: wellnessMode===m.id ? m.color : C.text }}>{m.title}</div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Query input for modes that need it */}
+                    {wellnessMode && (
+                      <div style={{ marginBottom: 10 }}>
+                        {/* Per-mode preset chips */}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 4 }}>
+                          {(wellnessMode === "biblical-foods" ? ["Olive Oil","Honey","Figs","Pomegranate","Lentils","Wine","Bread","Fish","Dates","Grapes"]
+                          : wellnessMode === "daniel-fast" ? ["Spiritual renewal","Healing","Clarity","Breakthrough","Discipline","Surrender"]
+                          : wellnessMode === "healing-foods" ? ["Stress","Fatigue","Inflammation","Sleep","Digestion","Immunity","Heart health","Joint pain"]
+                          : wellnessMode === "biblical-recipe" ? ["Breakfast","Lunch","Dinner","Soup","Bread","Dessert","Vegetarian","Feast"]
+                          : wellnessMode === "body-temple" ? ["Sleep","Exercise","Nutrition","Rest","Mental health","Addiction","Body image","Aging"]
+                          : ["Healing","Peace","Strength","Rest","Anxiety","Depression","Grief","Gratitude"]
+                          ).map(s => (
+                            <button key={s} onClick={() => setWellnessQuery(s)} style={{ padding: "3px 8px", background: wellnessQuery===s?`${C.green}15`:C.surface, border: `1px solid ${wellnessQuery===s?C.green:C.border}`, borderRadius: 12, fontSize: 9, color: wellnessQuery===s?C.green:C.dim, cursor: "pointer" }}>{s}</button>
+                          ))}
+                        </div>
+                        <input value={wellnessQuery} onChange={e => setWellnessQuery(e.target.value)} placeholder="Or type your own..." maxLength={200} style={{ ...inputS, fontSize: 11, marginBottom: 6 }} />
+                        <button onClick={() => generateWellness(wellnessMode, wellnessQuery)} disabled={isLoading("wellness")} style={{ width: "100%", padding: 12, background: isLoading("wellness") ? C.card : `linear-gradient(135deg, ${C.green}, #2d6b3f)`, border: "none", borderRadius: 8, color: isLoading("wellness") ? C.dim : "#fff", fontSize: 13, fontWeight: 700, cursor: isLoading("wellness") ? "default" : "pointer" }}>
+                          {isLoading("wellness") ? "⏳ Preparing..." : `🌿 Generate ${WELLNESS_MODES.find(m=>m.id===wellnessMode)?.title}`}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Results display */}
+                    {wellnessResult && wellnessMode === "biblical-foods" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.green}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.green, marginBottom: 4 }}>{wellnessResult.emoji} {wellnessResult.food}</div>
+                        {wellnessResult.hebrew_name && <div style={{ fontSize: 11, color: C.purple, fontFamily: mono }}>{wellnessResult.hebrew_name} — "{wellnessResult.meaning}"</div>}
+                        {wellnessResult.bible_references?.map((r,i) => <div key={i} style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginTop: 6 }}><span style={{ fontSize: 10, color: C.gold, fontWeight: 700 }}>{r.ref}</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>{r.context}</p><p style={{ fontSize: 10, color: C.dim, margin: "2px 0 0", fontStyle: "italic" }}>{r.significance}</p></div>)}
+                        {wellnessResult.nutritional_profile && <div style={{ marginTop: 8 }}><div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono }}>NUTRITION</div><p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>🥗 {wellnessResult.nutritional_profile.health_benefits?.join(" • ")}</p></div>}
+                        {wellnessResult.spiritual_symbolism && <p style={{ fontSize: 12, color: C.gold, marginTop: 6, fontStyle: "italic" }}>✝ {wellnessResult.spiritual_symbolism}</p>}
+                        {wellnessResult.prayer && <div style={{ background: `${C.purple}06`, borderRadius: 6, padding: 8, marginTop: 6 }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>PRAYER</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{wellnessResult.prayer}</p></div>}
+                        <AddBtn label={`Biblical Food: ${wellnessResult.food}`} content={`${wellnessResult.food}: ${wellnessResult.spiritual_symbolism}\n${wellnessResult.bible_references?.map(r=>r.ref+': '+r.context).join('\n')}`} />
+                      </div>
+                    )}
+
+                    {wellnessResult && wellnessMode === "daniel-fast" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.blue}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.blue, marginBottom: 2 }}>🍃 {wellnessResult.fast_name}</div>
+                        <div style={{ fontSize: 10, color: C.dim }}>{wellnessResult.duration} • {wellnessResult.scripture_basis}</div>
+                        <p style={{ fontSize: 12, color: C.text, margin: "6px 0", lineHeight: 1.5 }}>{wellnessResult.purpose}</p>
+                        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                          <div style={{ flex: 1 }}><div style={{ fontSize: 9, color: C.green, fontWeight: 700, fontFamily: mono }}>EAT</div>{wellnessResult.what_to_eat?.map((f,i) => <p key={i} style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>✅ {f}</p>)}</div>
+                          <div style={{ flex: 1 }}><div style={{ fontSize: 9, color: C.red, fontWeight: 700, fontFamily: mono }}>AVOID</div>{wellnessResult.what_to_avoid?.map((f,i) => <p key={i} style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>❌ {f}</p>)}</div>
+                        </div>
+                        {wellnessResult.daily_plan?.map((d,i) => <div key={i} style={{ background: C.surface, borderRadius: 8, padding: 8, marginBottom: 6 }}><div style={{ fontSize: 12, fontWeight: 700, color: C.blue }}>{d.day}: {d.theme}</div><div style={{ fontSize: 10, color: C.gold }}>{d.scripture}</div><p style={{ fontSize: 10, color: C.text, margin: "2px 0" }}>🍽️ {d.meal_ideas}</p><p style={{ fontSize: 10, color: C.purple, margin: "2px 0", fontStyle: "italic" }}>🙏 {d.prayer_focus}</p></div>)}
+                        <AddBtn label="Daniel Fast Plan" content={`${wellnessResult.fast_name} — ${wellnessResult.duration}\n${wellnessResult.scripture_basis}\n\n${wellnessResult.daily_plan?.map(d=>d.day+': '+d.theme+' ('+d.scripture+')').join('\n')}`} />
+                      </div>
+                    )}
+
+                    {wellnessResult && wellnessMode === "healing-foods" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.gold}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.gold, marginBottom: 2 }}>🌿 Healing Foods for: {wellnessResult.concern}</div>
+                        {wellnessResult.scripture_comfort && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginBottom: 8 }}><p style={{ fontSize: 12, color: C.text, fontStyle: "italic", margin: 0 }}>{wellnessResult.scripture_comfort}</p></div>}
+                        {wellnessResult.biblical_foods?.map((f,i) => <div key={i} style={{ background: C.surface, borderRadius: 8, padding: 8, marginBottom: 6 }}><div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{f.emoji} {f.food}</div><div style={{ fontSize: 10, color: C.gold }}>{f.scripture}</div><p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>{f.how_it_helps}</p></div>)}
+                        {wellnessResult.daily_routine && <div style={{ marginTop: 6 }}><div style={{ fontSize: 9, color: C.dim, fontWeight: 700, fontFamily: mono }}>DAILY ROUTINE</div><p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>🌅 AM: {wellnessResult.daily_routine.morning}</p><p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>☀️ PM: {wellnessResult.daily_routine.afternoon}</p><p style={{ fontSize: 11, color: C.text, margin: "2px 0" }}>🌙 Eve: {wellnessResult.daily_routine.evening}</p></div>}
+                        {wellnessResult.prayer && <div style={{ background: `${C.purple}06`, borderRadius: 6, padding: 8, marginTop: 8 }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>HEALING PRAYER</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{wellnessResult.prayer}</p></div>}
+                        {wellnessResult.disclaimer && <p style={{ fontSize: 9, color: C.dim, marginTop: 6 }}>⚠ {wellnessResult.disclaimer}</p>}
+                      </div>
+                    )}
+
+                    {wellnessResult && wellnessMode === "biblical-recipe" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.red}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.red, marginBottom: 2 }}>{wellnessResult.emoji} {wellnessResult.recipe_name}</div>
+                        <p style={{ fontSize: 11, color: C.dim }}>{wellnessResult.description} • Serves {wellnessResult.servings} • {wellnessResult.prep_time} prep + {wellnessResult.cook_time} cook</p>
+                        <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginTop: 8 }}>BIBLICAL INGREDIENTS</div>
+                        {wellnessResult.biblical_ingredients?.map((ing,i) => <div key={i} style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "flex-start" }}><span style={{ fontSize: 11, color: C.text, flex: 1 }}>{ing.ingredient}</span><span style={{ fontSize: 9, color: C.gold, fontStyle: "italic", flex: 1 }}>{ing.scripture}</span></div>)}
+                        <div style={{ fontSize: 10, color: C.dim, fontWeight: 700, fontFamily: mono, marginTop: 8 }}>INSTRUCTIONS</div>
+                        {wellnessResult.instructions?.map((s,i) => <div key={i} style={{ display: "flex", gap: 6, marginTop: 4 }}><span style={{ fontSize: 10, color: C.gold, fontWeight: 700, fontFamily: mono, minWidth: 16 }}>{i+1}.</span><span style={{ fontSize: 12, color: C.text, lineHeight: 1.5 }}>{s}</span></div>)}
+                        {wellnessResult.table_blessing && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginTop: 8 }}><span style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono }}>TABLE BLESSING</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{wellnessResult.table_blessing}</p></div>}
+                      </div>
+                    )}
+
+                    {wellnessResult && wellnessMode === "body-temple" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.purple}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.purple, marginBottom: 2 }}>🏛️ {wellnessResult.title}</div>
+                        {wellnessResult.key_verse && <div style={{ background: `${C.gold}06`, borderRadius: 6, padding: 8, marginBottom: 8 }}><p style={{ fontSize: 13, color: C.text, fontStyle: "italic", margin: 0 }}>"{wellnessResult.key_verse.text}"</p><span style={{ fontSize: 10, color: C.gold }}>— {wellnessResult.key_verse.ref}</span></div>}
+                        <p style={{ fontSize: 13, color: C.text, margin: "0 0 8px", lineHeight: 1.8, whiteSpace: "pre-line" }}>{wellnessResult.reflection}</p>
+                        {wellnessResult.body_check && <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{[{k:"physical",icon:"💪",color:C.green},{k:"mental",icon:"🧠",color:C.blue},{k:"spiritual",icon:"✝",color:C.gold}].map(c => <div key={c.k} style={{ flex: 1, background: `${c.color}06`, borderRadius: 8, padding: 8, textAlign: "center" }}><div style={{ fontSize: 16 }}>{c.icon}</div><div style={{ fontSize: 9, color: c.color, fontWeight: 700 }}>{c.k.toUpperCase()}</div><p style={{ fontSize: 10, color: C.text, margin: "2px 0 0" }}>{wellnessResult.body_check[c.k]}</p></div>)}</div>}
+                        {wellnessResult.practical_challenge && <div style={{ background: C.surface, borderRadius: 8, padding: 8, marginBottom: 6 }}><span style={{ fontSize: 9, color: C.green, fontWeight: 700, fontFamily: mono }}>THIS WEEK'S CHALLENGE</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>{wellnessResult.practical_challenge}</p></div>}
+                        {wellnessResult.prayer && <div style={{ background: `${C.purple}06`, borderRadius: 6, padding: 8 }}><span style={{ fontSize: 9, color: C.purple, fontWeight: 700, fontFamily: mono }}>PRAYER</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0", fontStyle: "italic" }}>{wellnessResult.prayer}</p></div>}
+                        <AddBtn label="Body Temple Devotional" content={`${wellnessResult.title}\n${wellnessResult.key_verse?.ref}: ${wellnessResult.key_verse?.text}\n\n${wellnessResult.reflection}`} />
+                      </div>
+                    )}
+
+                    {wellnessResult && wellnessMode === "wellness-prayer" && (
+                      <div style={{ ...cardS, borderLeft: `3px solid ${C.miracle}` }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: C.miracle, marginBottom: 4 }}>🙏 {wellnessResult.title}</div>
+                        {wellnessResult.opening && <div style={{ marginBottom: 8 }}><p style={{ fontSize: 13, color: C.text, margin: 0, fontStyle: "italic", lineHeight: 1.7 }}>{wellnessResult.opening.text}</p><p style={{ fontSize: 10, color: C.dim, marginTop: 2 }}>🧘 Posture: {wellnessResult.opening.posture}</p></div>}
+                        {[{k:"body_scan",icon:"🫀",title:"Body"},{k:"mind_clearing",icon:"🧠",title:"Mind"},{k:"spirit_filling",icon:"🕊️",title:"Spirit"}].map(s => wellnessResult[s.k] && <div key={s.k} style={{ background: C.surface, borderRadius: 8, padding: 8, marginBottom: 6 }}><div style={{ fontSize: 12, fontWeight: 700, color: C.green }}>{s.icon} {s.title}</div><p style={{ fontSize: 11, color: C.dim, margin: "2px 0" }}>{wellnessResult[s.k].instruction}</p><p style={{ fontSize: 12, color: C.text, margin: "2px 0", fontStyle: "italic" }}>{wellnessResult[s.k].prayer}</p></div>)}
+                        {wellnessResult.scripture_declarations?.length > 0 && <div style={{ marginTop: 6 }}><div style={{ fontSize: 9, color: C.gold, fontWeight: 700, fontFamily: mono, marginBottom: 4 }}>SCRIPTURE DECLARATIONS</div>{wellnessResult.scripture_declarations.map((d,i) => <div key={i} style={{ background: `${C.gold}06`, borderRadius: 6, padding: 6, marginBottom: 3 }}><span style={{ fontSize: 10, color: C.gold }}>{d.verse}:</span> <span style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>{d.declaration}</span></div>)}</div>}
+                        {wellnessResult.closing && <p style={{ fontSize: 12, color: C.text, margin: "8px 0", fontStyle: "italic", lineHeight: 1.6 }}>{wellnessResult.closing}</p>}
+                        {wellnessResult.wellness_action && <div style={{ background: `${C.green}06`, borderRadius: 6, padding: 8, marginTop: 4 }}><span style={{ fontSize: 9, color: C.green, fontWeight: 700, fontFamily: mono }}>WELLNESS ACTION</span><p style={{ fontSize: 12, color: C.text, margin: "2px 0 0" }}>🌿 {wellnessResult.wellness_action}</p></div>}
+                        <AddBtn label="Wellness Prayer" content={`${wellnessResult.title}\n\n${wellnessResult.opening?.text}\n\n${wellnessResult.scripture_declarations?.map(d=>d.verse+': '+d.declaration).join('\n')}\n\n${wellnessResult.closing}`} />
+                      </div>
+                    )}
+
+                    {isLoading("wellness") && <div style={{ textAlign: "center", padding: "30px 0" }}><div style={{ fontSize: 32, marginBottom: 8, animation: "float 1.5s ease infinite" }}>🌿</div><p style={{ color: C.dim, fontSize: 13 }}>Preparing something nourishing...</p></div>}
+                    <AIDisclaimer type="wellness" />
                   </>}
 
                   <button onClick={loadSermons} style={{ width: "100%", padding: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, color: C.dim, fontSize: 10, cursor: "pointer", fontFamily: font, marginTop: 8 }}>🔄 Refresh</button>
@@ -2112,13 +3290,13 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
               {shareMode === "view" && viewSermon && <div>
                 <button onClick={() => { setShareMode(null); setViewSermon(null); }} style={{ background: "none", border: "none", color: C.dim, fontSize: 12, cursor: "pointer", padding: "0 0 8px", fontFamily: font }}>← Back</button>
                 <div style={{ borderLeft: `3px solid ${C.gold}`, paddingLeft: 10, marginBottom: 10 }}><h2 style={{ fontSize: 17, fontWeight: 700, color: C.goldL, margin: "0 0 2px" }}>{viewSermon.title}</h2><div style={{ fontSize: 10, color: C.dim }}>by {viewSermon.author} • {viewSermon.displayDate}</div></div>
-                <div style={{ ...cardS, padding: 14 }}><p style={{ fontSize: 14, color: "#e2e8f0", margin: 0, lineHeight: 1.8, whiteSpace: "pre-line" }}>{viewSermon.body}</p></div>
+                <div style={{ ...cardS, padding: 14 }}><p style={{ fontSize: 14, color: C.text, margin: 0, lineHeight: 1.8, whiteSpace: "pre-line" }}>{viewSermon.body}</p></div>
                 <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                   {[{t:"love",i:"❤️",c:"#f87171"},{t:"pray",i:"🙏",c:"#a78bfa"},{t:"amen",i:"🙌",c:C.gold}].map(r => <button key={r.t} onClick={() => reactToSermon(viewSermon.id,r.t)} aria-label={r.t} style={{ flex: 1, padding: "7px 4px", background: `${r.c}08`, border: `1px solid ${r.c}25`, borderRadius: 8, cursor: "pointer", textAlign: "center" }}><div style={{ fontSize: 16 }}>{r.i}</div><div style={{ fontSize: 14, fontWeight: 700, color: r.c, fontFamily: mono }}>{viewSermon.reactions?.[r.t]||0}</div></button>)}
                 </div>
                 <button onClick={() => addToDoc("sermon-shared",viewSermon.title,`${viewSermon.title} — ${viewSermon.author}\n\n${viewSermon.body}`)} style={{ width: "100%", padding: 7, background: `${C.green}10`, border: `1px solid ${C.green}25`, borderRadius: 6, color: C.green, fontSize: 10, fontWeight: 600, cursor: "pointer", marginBottom: 8 }}>📄 Save to Doc</button>
                 <div style={{ fontSize: 9, color: C.dim, fontFamily: mono, marginBottom: 4 }}>COMMENTS ({viewSermon.comments?.length||0})</div>
-                {(viewSermon.comments||[]).map(c => <div key={c.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: 7, marginBottom: 3 }}><span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{c.author}</span><p style={{ fontSize: 11, color: "#cbd5e1", margin: "2px 0 0" }}>{c.text}</p></div>)}
+                {(viewSermon.comments||[]).map(c => <div key={c.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: 7, marginBottom: 3 }}><span style={{ fontSize: 9, color: C.dim, fontFamily: mono }}>{c.author}</span><p style={{ fontSize: 11, color: C.text, margin: "2px 0 0" }}>{c.text}</p></div>)}
                 <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
                   <input value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Encourage..." maxLength={INPUT_LIMITS.comment} style={{ ...inputS, flex: 1, fontSize: 11 }} onKeyDown={e => { if(e.key==="Enter") addComment(viewSermon.id); }} />
                   <button onClick={() => addComment(viewSermon.id)} disabled={!commentText.trim()} style={{ background: commentText.trim()?`${C.gold}15`:C.surface, border: `1px solid ${commentText.trim()?`${C.gold}30`:C.border}`, color: commentText.trim()?C.gold:C.dim, borderRadius: 5, padding: "0 10px", fontSize: 11, cursor: commentText.trim()?"pointer":"default" }}>Send</button>
@@ -2181,12 +3359,12 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                   <span style={{ fontSize: 20 }}>✨</span>
                   <span style={{ fontSize: 9, fontFamily: mono, color: C.miracle, textTransform: "uppercase", letterSpacing: 1.2, fontWeight: 700 }}>Inspiring Story</span>
                 </div>
-                <h3 style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0", margin: "0 0 6px", lineHeight: 1.3 }}>{briefing.inspiring.headline}</h3>
-                <p style={{ fontSize: 13, color: "#cbd5e1", margin: "0 0 8px", lineHeight: 1.7 }}>{briefing.inspiring.summary}</p>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text, margin: "0 0 6px", lineHeight: 1.3 }}>{briefing.inspiring.headline}</h3>
+                <p style={{ fontSize: 13, color: C.text, margin: "0 0 8px", lineHeight: 1.7 }}>{briefing.inspiring.summary}</p>
                 {briefing.inspiring.source && <p style={{ fontSize: 9, color: C.dim, fontFamily: mono, margin: "0 0 8px" }}>— {briefing.inspiring.source}</p>}
                 <div style={{ background: `${C.miracle}10`, borderRadius: 8, padding: "8px 10px" }}>
                   <span style={{ fontSize: 9, color: C.miracle, fontFamily: mono, fontWeight: 700 }}>🙏 PRAYER</span>
-                  <p style={{ fontSize: 12, color: "#86efac", margin: "3px 0 0", fontStyle: "italic", lineHeight: 1.5 }}>{briefing.inspiring.prayer}</p>
+                  <p style={{ fontSize: 12, color: C.green, margin: "3px 0 0", fontStyle: "italic", lineHeight: 1.5 }}>{briefing.inspiring.prayer}</p>
                 </div>
               </div>
             )}
@@ -2201,8 +3379,8 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 {briefing.local.map((item, i) => (
                   <div key={`local-${i}`} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 6, borderLeft: `3px solid ${C.gold}` }}>
                     <span style={{ fontSize: 8, color: C.dim, fontFamily: mono, textTransform: "uppercase" }}>{item.category}</span>
-                    <h4 style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0", margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
-                    <p style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
+                    <p style={{ fontSize: 12, color: C.dim, margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
                     <p style={{ fontSize: 11, color: C.purple, margin: 0, fontStyle: "italic" }}>🙏 {item.prayer}</p>
                   </div>
                 ))}
@@ -2219,8 +3397,8 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 {briefing.regional.map((item, i) => (
                   <div key={`reg-${i}`} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 6, borderLeft: `3px solid ${C.blue}` }}>
                     <span style={{ fontSize: 8, color: C.dim, fontFamily: mono, textTransform: "uppercase" }}>{item.category}</span>
-                    <h4 style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0", margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
-                    <p style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
+                    <p style={{ fontSize: 12, color: C.dim, margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
                     <p style={{ fontSize: 11, color: C.purple, margin: 0, fontStyle: "italic" }}>🙏 {item.prayer}</p>
                   </div>
                 ))}
@@ -2237,8 +3415,8 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
                 {briefing.global.map((item, i) => (
                   <div key={`glob-${i}`} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 6, borderLeft: `3px solid ${C.miracle}` }}>
                     <span style={{ fontSize: 8, color: C.dim, fontFamily: mono, textTransform: "uppercase" }}>{item.category}</span>
-                    <h4 style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0", margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
-                    <p style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: "2px 0 4px", lineHeight: 1.3 }}>{item.headline}</h4>
+                    <p style={{ fontSize: 12, color: C.dim, margin: "0 0 6px", lineHeight: 1.5 }}>{item.summary}</p>
                     <p style={{ fontSize: 11, color: C.purple, margin: 0, fontStyle: "italic" }}>🙏 {item.prayer}</p>
                   </div>
                 ))}
@@ -2248,7 +3426,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
             {/* Verse of Encouragement */}
             {briefing.verse_of_encouragement && (
               <div style={{ background: `${C.gold}06`, border: `1px solid ${C.gold}20`, borderRadius: 10, padding: 14, margin: "12px 0", textAlign: "center" }}>
-                <p style={{ fontSize: 14, color: "#e2e8f0", margin: "0 0 4px", fontStyle: "italic", lineHeight: 1.6 }}>"{briefing.verse_of_encouragement.text}"</p>
+                <p style={{ fontSize: 14, color: C.text, margin: "0 0 4px", fontStyle: "italic", lineHeight: 1.6 }}>"{briefing.verse_of_encouragement.text}"</p>
                 <span style={{ fontSize: 10, color: C.gold, fontFamily: mono }}>— {briefing.verse_of_encouragement.ref}</span>
               </div>
             )}
@@ -2257,7 +3435,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
             {briefing.closing_prayer && (
               <div style={{ background: `${C.purple}08`, border: `1px solid ${C.purple}25`, borderRadius: 10, padding: 14, marginBottom: 10 }}>
                 <div style={{ fontSize: 9, fontFamily: mono, color: C.purple, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>🙏 Prayer for Today's World</div>
-                <p style={{ fontSize: 13, color: "#cbd5e1", margin: 0, fontStyle: "italic", lineHeight: 1.7 }}>{briefing.closing_prayer}</p>
+                <p style={{ fontSize: 13, color: C.text, margin: 0, fontStyle: "italic", lineHeight: 1.7 }}>{briefing.closing_prayer}</p>
               </div>
             )}
 
@@ -2268,6 +3446,55 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
             </div>
 
             <AIDisclaimer type="briefing" />
+          </div>
+        </div>
+      )}
+
+      {/* ═══ FIRST-TIME ONBOARDING ═══ */}
+      {showOnboarding && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(45,36,22,0.7)", backdropFilter: "blur(6px)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: C.card, borderRadius: 20, padding: 28, width: "100%", maxWidth: 360, textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
+            <div style={{ fontSize: 40, marginBottom: 8 }}>✝</div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: "0 0 6px", fontFamily: font }}>Welcome to LordsGuide</h2>
+            <p style={{ fontSize: 13, color: C.dim, margin: "0 0 16px" }}>Here's how to prepare your first sermon:</p>
+
+            {[
+              { icon: "✏️", title: "Enter a passage — or describe what you need", desc: "Type 'Romans 8:28' or tap 🔍 to search by topic like 'God's plan for my life'" },
+              { icon: "🎤", title: "Tap 'Generate Sermon'", desc: "AI builds a complete 3-point outline with illustrations and applications in 60 seconds" },
+              { icon: "📝", title: "Collect notes → Compile", desc: "Save the best parts with '+ Doc', add your own notes, then tap 'AI Compile' for a full preachable sermon" },
+            ].map((s, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, textAlign: "left", marginBottom: 10, padding: 8, background: C.surface, borderRadius: 10 }}>
+                <div style={{ fontSize: 22, flexShrink: 0, paddingTop: 2 }}>{s.icon}</div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{s.title}</div>
+                  <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.4, marginTop: 2 }}>{s.desc}</div>
+                </div>
+              </div>
+            ))}
+
+            <button onClick={() => setShowOnboarding(false)} style={{ width: "100%", padding: 14, background: C.gold, border: "none", borderRadius: 12, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: font, marginTop: 8 }}>Got it — let's go! ✝</button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ FLOATING SERMON NOTES PREVIEW ═══ */}
+      {docBlocks.length > 0 && screen !== "document" && screen !== "landing" && screen !== "podium" && !showBlessingModal && !showClosingPrayer && (
+        <div style={{ position: "fixed", bottom: 56, left: 0, right: 0, zIndex: 100, padding: "0 12px" }}>
+          <div style={{ background: C.card, border: `1px solid ${C.gold}25`, borderRadius: "12px 12px 0 0", boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", maxHeight: showNotesPreview ? 240 : 42, overflow: "hidden", transition: "max-height 0.3s ease" }}>
+            <button onClick={() => setShowNotesPreview(!showNotesPreview)} style={{ width: "100%", padding: "10px 14px", background: "none", border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: C.gold }}>📄 Sermon Notes ({docBlocks.length})</span>
+              <span style={{ fontSize: 10, color: C.dim }}>{showNotesPreview ? "▼ Hide" : "▲ Preview"}</span>
+            </button>
+            {showNotesPreview && (
+              <div style={{ padding: "0 14px 10px", maxHeight: 190, overflowY: "auto" }}>
+                {docBlocks.slice(-4).map(b => (
+                  <div key={b.id} style={{ fontSize: 11, color: C.text, padding: "4px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.gold, fontWeight: 600, fontSize: 9, fontFamily: mono }}>{b.label}:</span> {b.content.slice(0, 80)}{b.content.length > 80 ? "..." : ""}
+                  </div>
+                ))}
+                <button onClick={() => setScreen("document")} style={{ width: "100%", marginTop: 6, padding: 8, background: `${C.gold}10`, border: `1px solid ${C.gold}25`, borderRadius: 6, color: C.gold, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Open Full Notes → Compile Sermon</button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2321,7 +3548,7 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
           <div style={{ background: C.card, border: `1px solid ${C.gold}30`, borderRadius: 16, padding: 28, width: "100%", maxWidth: 380, textAlign: "center" }}>
             <div style={{ fontSize: 36, marginBottom: 10 }}>🙏</div>
             <h2 style={{ fontSize: 18, fontWeight: 700, color: C.goldL, margin: "0 0 12px" }}>{t.closingPrayer}</h2>
-            <p style={{ fontSize: 14, color: "#e2e8f0", margin: "0 0 16px", lineHeight: 1.8, fontStyle: "italic" }}>{getSessionPrayer()}</p>
+            <p style={{ fontSize: 14, color: C.text, margin: "0 0 16px", lineHeight: 1.8, fontStyle: "italic" }}>{getSessionPrayer()}</p>
             <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12, marginTop: 8 }}>
               <p style={{ fontSize: 11, color: C.gold, fontFamily: mono, margin: "0 0 12px" }}>"{dailyQuote.text}" — {dailyQuote.ref}</p>
             </div>
@@ -2337,8 +3564,8 @@ Generate 2 local, 2 regional, and 3 global stories. Categories: persecution, mis
             { id: "home", icon: "✝", label: t.study },
             { id: "bible", icon: "📖", label: t.bible },
             { id: "sources", icon: "📚", label: t.sources },
-            { id: "community", icon: "🕊️", label: t.shared },
-            { id: "document", icon: "📄", label: `${t.doc}${docBlocks.length?` (${docBlocks.length})`:""}`},
+            { id: "community", icon: "🌍", label: t.shared },
+            { id: "document", icon: "📝", label: `${t.doc}${docBlocks.length?` (${docBlocks.length})`:""}`},
           ].map(n => (
             <button key={n.id} onClick={() => { if(n.id==="bible"&&!bibleText) loadBible(); if(n.id==="community"){ loadSermons(); loadPrayers(); } setScreen(n.id); }} aria-label={n.label} aria-current={screen===n.id?"page":undefined} style={{
               flex: 1, padding: "7px 0 5px", background: "none", border: "none",
