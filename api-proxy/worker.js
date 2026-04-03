@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SCRIPTURE FORGE — Cloudflare Worker API Proxy
+// LORDSGUIDE — Cloudflare Worker API Proxy
 // Keeps ANTHROPIC_API_KEY server-side. Never exposed to client.
 //
 // Deploy: cd api-proxy && npx wrangler deploy
@@ -14,9 +14,9 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
 ];
 
-const RATE_LIMIT_MAP = new Map(); // IP -> { count, resetAt }
-const RATE_LIMIT_MAX = 60; // requests per window
-const RATE_LIMIT_WINDOW = 60_000; // 1 minute
+const RATE_LIMIT_MAP = new Map();
+const RATE_LIMIT_MAX = 60;
+const RATE_LIMIT_WINDOW = 60000;
 
 function checkRateLimit(ip) {
   const now = Date.now();
@@ -30,9 +30,16 @@ function checkRateLimit(ip) {
 }
 
 function corsHeaders(origin) {
-  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  if (origin && (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.lordsguide.pages.dev'))) {
+    return {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400',
+    };
+  }
   return {
-    'Access-Control-Allow-Origin': allowed,
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0],
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
@@ -72,10 +79,9 @@ export default {
     }
 
     try {
-      // Parse and validate request body
       const body = await request.json();
 
-      // Only allow specific model
+      // Only allow specific models
       const allowedModels = ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001'];
       if (!allowedModels.includes(body.model)) {
         return new Response(JSON.stringify({ error: 'Invalid model' }), {
@@ -83,7 +89,7 @@ export default {
         });
       }
 
-      // Cap max_tokens to prevent abuse
+      // Cap max_tokens
       body.max_tokens = Math.min(body.max_tokens || 4000, 4096);
 
       // Forward to Anthropic
